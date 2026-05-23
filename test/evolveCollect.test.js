@@ -719,3 +719,120 @@ describe('readMemorySnippet / readUserSnippet / readRealSessionLog fallback (#54
     } finally { rmTmp(root); }
   });
 });
+
+// ---------------------------------------------------------------------------
+// End-to-end pipeline: collect.js readers → gep/signals.js extractor
+// (issue #540 / #113). The function-level tests above cover collect.js in
+// isolation, but the bug originally observed is end-to-end: the three advisory
+// signals (memory_missing / user_missing / session_logs_missing) being raised
+// on every cycle. These tests run collect.js and pipe its outputs through
+// extractSignals so a future refactor that breaks the chain at either end
+// fails loudly, not "the readers still return the right strings but signals
+// no longer suppress correctly".
+// ---------------------------------------------------------------------------
+describe('e2e #540: collect.js outputs through signals.js should suppress 3 advisories on Codex', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawnSync } = require('child_process');
+
+  const { extractSignals } = require('../src/gep/signals');
+
+  function mkTmp() {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'evolver-collect-e2e-'));
+  }
+  function rmTmp(dir) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+
+  function runCollectInChild(repoRoot, env = {}) {
+    const script = `
+      const collect = require(${JSON.stringify(path.resolve(__dirname, '..', 'src', 'evolve', 'pipeline', 'collect.js'))});
+      console.log(JSON.stringify({
+        mem: collect.readMemorySnippet(),
+        usr: collect.readUserSnippet(),
+        sess: collect.readRealSessionLog(),
+      }));
+    `;
+    const res = spawnSync(process.execPath, ['-e', script], {
+      env: {
+        ...process.env,
+        EVOLVER_REPO_ROOT: repoRoot,
+        EVOLVER_NO_PARENT_GIT: 'true',
+        EVOLVER_QUIET_PARENT_GIT: '1',
+        EVOLVER_SESSION_SOURCE: 'cursor',
+        EVOLVER_CURSOR_TRANSCRIPTS_DIR: path.join(repoRoot, '__nope__'),
+        OPENCLAW_WORKSPACE: repoRoot,
+        AGENT_SESSIONS_DIR: path.join(repoRoot, '__nope__'),
+        HOME: repoRoot,
+        ...env,
+      },
+      encoding: 'utf8',
+    });
+    if (res.status !== 0) {
+      throw new Error(`child failed: ${res.stderr || res.stdout}`);
+    }
+    return JSON.parse(res.stdout.trim().split('\n').pop());
+  }
+
+  it('Codex-like setup (AGENTS.md marker + memory_graph outcomes) emits 0 of the 3 advisory signals', () => {
+    const tmp = mkTmp();
+    try {
+      // What `setup-hooks --platform=codex` injects: the marker-wrapped section.
+      fs.writeFileSync(path.join(tmp, 'AGENTS.md'),
+        '# Project Agents\n\n<!-- evolver-evolution-memory -->\n## Evolution Memory\nRecent outcomes: 2 successes.\n<!-- /evolver-evolution-memory -->\n\n## User Notes\nunrelated\n',
+        'utf8');
+      // What the daemon accumulates after the first few cycles.
+      const evoDir = path.join(tmp, 'memory', 'evolution');
+      fs.mkdirSync(evoDir, { recursive: true });
+      fs.writeFileSync(path.join(evoDir, 'memory_graph.jsonl'),
+        JSON.stringify({ kind: 'outcome', ts: '2026-05-22T01:00:00Z', signal: { signals: ['perf_improved'] }, outcome: { status: 'success', score: 0.82, note: 'speed up' } }) + '\n' +
+        JSON.stringify({ kind: 'outcome', ts: '2026-05-22T02:00:00Z', signal: { signals: ['stability_increase'] }, outcome: { status: 'success', score: 0.91, note: 'fix flake' } }) + '\n',
+        'utf8');
+
+      const out = runCollectInChild(tmp);
+      const signals = extractSignals({
+        recentSessionTranscript: out.sess,
+        todayLog: '',
+        memorySnippet: out.mem,
+        userSnippet: out.usr,
+        recentEvents: [],
+      });
+
+      const advisories = ['memory_missing', 'user_missing', 'session_logs_missing'];
+      const fired = signals.filter((s) => advisories.includes(s));
+      assert.deepEqual(fired, [],
+        `Codex scenario must not raise advisory signals, but got: ${JSON.stringify(fired)}; full signals=${JSON.stringify(signals)}`);
+    } finally { rmTmp(tmp); }
+  });
+
+  it('truly-empty setup (no MD, no marker, no memory_graph) preserves all 3 advisories for legacy users', () => {
+    const tmp = mkTmp();
+    try {
+      // Deliberately create nothing. readers should return their literal
+      // [XXX MISSING] placeholders, which signals.js triggers on.
+      const out = runCollectInChild(tmp);
+      assert.equal(out.mem, '[MEMORY.md MISSING]');
+      assert.equal(out.usr, '[USER.md MISSING]');
+      assert.equal(out.sess, '[NO SESSION LOGS FOUND]');
+
+      const signals = extractSignals({
+        recentSessionTranscript: out.sess,
+        todayLog: '',
+        memorySnippet: out.mem,
+        userSnippet: out.usr,
+        recentEvents: [],
+      });
+
+      // signals.js post-processing strips advisories when actionable signals
+      // are present. In a truly-empty corpus there are no actionable signals,
+      // so all three advisories must survive to surface the setup gap.
+      assert.ok(signals.includes('memory_missing'),
+        `memory_missing must fire in empty scenario, signals=${JSON.stringify(signals)}`);
+      assert.ok(signals.includes('user_missing'),
+        `user_missing must fire in empty scenario, signals=${JSON.stringify(signals)}`);
+      assert.ok(signals.includes('session_logs_missing'),
+        `session_logs_missing must fire in empty scenario, signals=${JSON.stringify(signals)}`);
+    } finally { rmTmp(tmp); }
+  });
+});

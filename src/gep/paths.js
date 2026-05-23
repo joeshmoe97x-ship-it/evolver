@@ -299,32 +299,51 @@ function getEvomapPath(...segments) {
 // claim a different workspace. workspace-id replaces that self-report
 // with a secret that only the legitimate workspace's evolver knows
 // (Bugbot PR #108 round-3 Agentic Security Review MEDIUM).
-function getWorkspaceId() {
-  if (process.env.EVOLVER_WORKSPACE_ID) return String(process.env.EVOLVER_WORKSPACE_ID);
-  const dir = path.join(getWorkspaceRoot(), '.evolver');
-  const file = path.join(dir, 'workspace-id');
+//
+// Issue #111 Phase 1: optionally backs the secret with the OS keychain
+// (`@napi-rs/keyring` optional dep) to close the same-uid readability
+// gap. Mode is controlled by `EVOLVER_WORKSPACE_KEYCHAIN` (auto/force/
+// off, default `auto`). FS file is RETAINED on successful keychain
+// migration so bun-compiled binaries (which can't `require()` the
+// addon yet — Phase 2) still see the same id when handing off to a
+// node-CLI session in the same workspace.
 
-  // Refuse to follow symlinks at either the directory or file level.
-  // A malicious repo can pre-place `.evolver` or `.evolver/workspace-id`
-  // as a symlink to an attacker-chosen path outside the workspace, and
-  // mkdirSync({recursive:true}) / writeFileSync would silently follow
-  // it — clobbering the linked file with the secret payload (Bugbot PR
-  // #109 round-2 HIGH, Agentic Security Review).
+// Read the FS-backed workspace-id at <workspace>/.evolver/workspace-id.
+// Returns the id on a clean read, null on any error or missing file.
+// Symlink rejection matches the pre-keychain hardening from PR #109.
+function _readWorkspaceIdFromFs(file) {
+  const dir = path.dirname(file);
   try {
     const dirStat = fs.lstatSync(dir, { throwIfNoEntry: false });
     if (dirStat && dirStat.isSymbolicLink()) return null;
     const fileStat = fs.lstatSync(file, { throwIfNoEntry: false });
-    if (fileStat) {
-      if (fileStat.isSymbolicLink() || !fileStat.isFile()) return null;
-      try {
-        const raw = fs.readFileSync(file, 'utf8').trim();
-        if (raw && /^[a-f0-9]{32,}$/i.test(raw)) return raw;
-      } catch { /* unreadable — fall through to recreate */ }
-    }
-  } catch { /* fall through to create */ }
+    if (!fileStat) return null;
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) return null;
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    if (raw && /^[a-f0-9]{32,}$/i.test(raw)) return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Atomically create <workspace>/.evolver/workspace-id with the given id
+// (or generate one if `id` is null). Returns the id that ended up on
+// disk, or null on any unrecoverable error. EEXIST races re-read.
+function _writeWorkspaceIdToFs(file, id) {
+  const dir = path.dirname(file);
   try {
+    // Refuse to write if `.evolver` is a symlink. mkdirSync({recursive:true})
+    // happily traverses an existing symlinked directory and the subsequent
+    // open() lands the secret file in the attacker-controlled target —
+    // O_NOFOLLOW only guards the FINAL path component, not intermediate
+    // directories. The pre-refactor monolithic getWorkspaceId() returned
+    // null on a symlinked dir before reaching the write; preserve that
+    // here (Bugbot PR #121 round-1 HIGH; original guard PR #109 round-2 HIGH).
+    const dirStat = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (dirStat && dirStat.isSymbolicLink()) return null;
     fs.mkdirSync(dir, { recursive: true });
-    const id = require('crypto').randomBytes(16).toString('hex');
+    const payload = id || require('crypto').randomBytes(16).toString('hex');
     // Atomic create-and-fail-if-exists so we never overwrite an
     // attacker-pre-placed file (TOCTOU between lstat and writeFileSync
     // could otherwise race a symlink in). O_NOFOLLOW also refuses to
@@ -337,30 +356,104 @@ function getWorkspaceId() {
     try {
       fd = fs.openSync(file, flags, 0o600);
     } catch (e) {
-      // EEXIST means another process beat us to it — re-read with the
-      // same symlink guards as above.
       if (e && e.code === 'EEXIST') {
-        const fileStat = fs.lstatSync(file, { throwIfNoEntry: false });
-        if (!fileStat || fileStat.isSymbolicLink() || !fileStat.isFile()) return null;
-        try {
-          const raw = fs.readFileSync(file, 'utf8').trim();
-          if (raw && /^[a-f0-9]{32,}$/i.test(raw)) return raw;
-        } catch { /* unreadable */ }
-        return null;
+        // Another process beat us — re-read with the same symlink guards.
+        return _readWorkspaceIdFromFs(file);
       }
       // ELOOP / EMLINK from O_NOFOLLOW hitting a symlink — refuse.
       return null;
     }
     try {
-      fs.writeSync(fd, id + '\n', 0, 'utf8');
+      fs.writeSync(fd, payload + '\n', 0, 'utf8');
     } finally {
       fs.closeSync(fd);
     }
     try { fs.chmodSync(file, 0o600); } catch { /* best-effort */ }
-    return id;
+    return payload;
   } catch {
     return null;
   }
+}
+
+function getWorkspaceId() {
+  if (process.env.EVOLVER_WORKSPACE_ID) return String(process.env.EVOLVER_WORKSPACE_ID);
+  const workspaceRoot = getWorkspaceRoot();
+  const dir = path.join(workspaceRoot, '.evolver');
+  const file = path.join(dir, 'workspace-id');
+
+  let mode = 'off';
+  let keychain = null;
+  try {
+    keychain = require('./workspaceKeychain');
+    mode = keychain.getMode();
+  } catch {
+    // workspaceKeychain.js missing — degrade silently to FS-only.
+    mode = 'off';
+  }
+
+  if (mode !== 'off' && keychain) {
+    const addonAvailable = keychain.loadAddon() !== null;
+    if (mode === 'force' && !addonAvailable) {
+      throw new Error(
+        'EVOLVER_WORKSPACE_KEYCHAIN=force but @napi-rs/keyring is not installed. ' +
+        'Install it (`npm i @napi-rs/keyring`) or set EVOLVER_WORKSPACE_KEYCHAIN=auto/off.'
+      );
+    }
+    if (addonAvailable) {
+      const hit = keychain.readFromKeychain(workspaceRoot);
+      if (hit.available && hit.id) return hit.id;
+
+      // `force` must NEVER fall back to FS read/write — that would
+      // silently re-introduce same-uid plaintext exposure of the
+      // workspace secret, which is exactly what `force` exists to
+      // prevent (Bugbot PR #121 round-2 MEDIUM Agentic Security).
+      // Generate a fresh id and write it ONLY to the keychain; if
+      // that write fails, throw rather than mirror to FS.
+      if (mode === 'force') {
+        if (hit.available) {
+          // Keychain reachable but empty — mint and write keychain-only.
+          const newId = require('crypto').randomBytes(16).toString('hex');
+          if (!keychain.writeToKeychain(workspaceRoot, newId)) {
+            throw new Error(
+              'EVOLVER_WORKSPACE_KEYCHAIN=force: keychain write failed; ' +
+              'refusing to fall back to filesystem secret.'
+            );
+          }
+          return newId;
+        }
+        // Addon loaded but read claims unavailable (e.g. locked
+        // keyring on Linux, no D-Bus session). Refuse rather than
+        // silently degrade.
+        throw new Error(
+          'EVOLVER_WORKSPACE_KEYCHAIN=force: keychain reports unavailable ' +
+          '(locked keyring / no session?); refusing to fall back to filesystem.'
+        );
+      }
+
+      // mode === 'auto', keychain miss — try to migrate an existing
+      // FS secret in.
+      const fsId = _readWorkspaceIdFromFs(file);
+      if (fsId) {
+        keychain.writeToKeychain(workspaceRoot, fsId); // best-effort
+        return fsId;
+      }
+
+      // No secret anywhere — generate, write FS atomically, then
+      // mirror to keychain. FS write is the source of truth for the
+      // value (race-resistant via O_EXCL); keychain is the upgrade.
+      const newId = _writeWorkspaceIdToFs(file, null);
+      if (!newId) return null;
+      keychain.writeToKeychain(workspaceRoot, newId); // best-effort
+      return newId;
+    }
+    // mode === 'auto' && addon unavailable → fall through to FS.
+  }
+
+  // FS-only path (mode === 'off' or auto-fallback). Identical to the
+  // pre-#111 implementation in observable behavior.
+  const existing = _readWorkspaceIdFromFs(file);
+  if (existing) return existing;
+  return _writeWorkspaceIdToFs(file, null);
 }
 
 module.exports = {
