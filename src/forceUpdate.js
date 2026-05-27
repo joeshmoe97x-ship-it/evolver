@@ -83,7 +83,8 @@ function executeForceUpdate(forceUpdate) {
       var entries = fs.readdirSync(INSTALL_ROOT, { withFileTypes: true });
       for (var ei = 0; ei < entries.length; ei++) {
         var eName = entries[ei].name;
-        if (eName === 'node_modules' || eName === 'memory' || eName === '.git' || eName === 'MEMORY.md') continue;
+        if (eName === 'node_modules' || eName === 'memory' || eName === '.git' || eName === 'MEMORY.md'
+            || eName === '.env' || eName === '.env.local' || eName === 'USER.md' || eName === '.evolver') continue;
         try { fs.rmSync(path.join(INSTALL_ROOT, eName), { recursive: true, force: true }); } catch (_) {}
       }
       var newEntries = fs.readdirSync(TMP_TARGET, { withFileTypes: true });

@@ -1,11 +1,18 @@
-// ATP Auto-Buyer (opt-out, default ON as of ATP liquidity unlock)
+// ATP Auto-Buyer (opt-in: requires explicit consent before auto-spending)
 // Converts capability gaps into ATP orders with strict budget caps and
-// 24h question-level deduplication. Disable by setting
-// EVOLVER_ATP_AUTOBUY=off. Budget caps:
+// 24h question-level deduplication. Budget caps:
 //   ATP_AUTOBUY_DAILY_CAP_CREDITS     (default 50)
 //   ATP_AUTOBUY_PER_ORDER_CAP_CREDITS (default 10)
 // Cold-start safety: the first 5 minutes after process start use a half-cap
 // to protect against misconfiguration loops on restart storms.
+//
+// Consent resolution (in order):
+//   1. EVOLVER_ATP_AUTOBUY=on|off env — explicit operator override wins.
+//   2. ack file at <memory>/atp-autobuy-ack.json with `{enabled: bool}` —
+//      written by first-run prompt (cliAutobuyPrompt) or `evolver atp
+//      enable|disable`.
+//   3. No signal → OFF. New installs never auto-spend before the user has
+//      explicitly opted in (consumer protection: ATP spends real credits).
 //
 // Integration contract:
 //   1) Call start({ dailyCap, perOrderCap }) once at Evolver boot. The
@@ -31,6 +38,7 @@ const DEFAULT_ORDER_TIMEOUT_MS = 3000;
 const COLD_START_WINDOW_MS = 5 * 60 * 1000;
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
 const LEDGER_FILENAME = 'atp-autobuyer-ledger.json';
+const ACK_FILENAME = 'atp-autobuy-ack.json';
 
 let _started = false;
 let _startedAt = 0;
@@ -44,18 +52,57 @@ function _ledgerPath() {
   return path.join(getMemoryDir(), LEDGER_FILENAME);
 }
 
+function _ackPath() {
+  return path.join(getMemoryDir(), ACK_FILENAME);
+}
+
 function _todayKey(now) {
   const d = new Date(typeof now === 'number' ? now : Date.now());
   return d.toISOString().slice(0, 10); // UTC YYYY-MM-DD
 }
 
-function _isEnabled() {
-  // Default ON: the evolve loop starts autoBuyer at the top of every cycle
-  // so new users get ATP buyer routing out of the box. Disable by setting
-  // EVOLVER_ATP_AUTOBUY=off. Budget caps (DAILY_CAP + PER_ORDER_CAP) keep
-  // the downside bounded even when this is on.
-  const raw = (process.env.EVOLVER_ATP_AUTOBUY || 'on').toLowerCase().trim();
-  return raw !== 'off' && raw !== '0' && raw !== 'false';
+function _readAck() {
+  try {
+    const p = _ackPath();
+    if (!fs.existsSync(p)) return null;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.enabled !== 'boolean') return null;
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Resolve consent. Returns:
+//   { enabled: true,  source: 'env'|'ack'|'default' }
+//   { enabled: false, source: 'env'|'ack' }
+// The `default` case is the new-install path (no env override, no ack file):
+// auto-spend defaults ON, gated by the daily/per-order caps and the cold-start
+// half-cap window. The first-run prompt and `evolver atp disable` remain the
+// opt-out paths for users who do not want auto-spend; once an explicit ack is
+// recorded the source flips to 'ack' and the user's choice (either way) wins
+// over this default.
+function getConsent() {
+  const envRaw = process.env.EVOLVER_ATP_AUTOBUY;
+  if (typeof envRaw === 'string') {
+    // Trim BEFORE the length check so whitespace-only values
+    // (e.g. EVOLVER_ATP_AUTOBUY=" ") count as unset, matching the
+    // classify() helper in cliAutobuyPrompt.js. Without this alignment a
+    // whitespace value would skip the prompt in classify (treats as unset
+    // → 'eligible') but still enter this env branch, trim to "", fail to
+    // match 'off'/'0'/'false', and silently return enabled=true.
+    const s = envRaw.trim().toLowerCase();
+    if (s.length > 0) {
+      const enabled = s !== 'off' && s !== '0' && s !== 'false';
+      return { enabled, source: 'env' };
+    }
+  }
+  const ack = _readAck();
+  if (ack) {
+    return { enabled: ack.enabled === true, source: 'ack' };
+  }
+  return { enabled: true, source: 'default' };
 }
 
 function _emptyLedger() {
@@ -125,7 +172,8 @@ function _effectiveCap(value, now) {
 
 function start(opts) {
   if (_started) return;
-  if (!_isEnabled()) return;
+  const consent = getConsent();
+  if (!consent.enabled) return;
   _started = true;
   _startedAt = Date.now();
   const dailyCap = Math.max(0, Math.floor(Number((opts && opts.dailyCap) || process.env.ATP_AUTOBUY_DAILY_CAP_CREDITS) || DEFAULT_DAILY_CAP));
@@ -213,6 +261,24 @@ async function considerOrder(opts) {
   return { ok: false, error: (result && result.error) || 'unknown_error' };
 }
 
+// Write the consent ack file. Used by `evolver atp enable|disable` and the
+// first-run prompt. `enabled=true` persists opt-in; `enabled=false` persists
+// explicit opt-out so the prompt does not re-ask next session. Atomic write
+// via .tmp + rename so a crash mid-write never produces a corrupt ack file.
+function setConsent(enabled) {
+  const dir = getMemoryDir();
+  try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  const body = {
+    enabled: !!enabled,
+    acknowledged_at: new Date().toISOString(),
+    version: 1,
+  };
+  const tmp = _ackPath() + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  fs.renameSync(tmp, _ackPath());
+  return body;
+}
+
 // Test-only reset, not exported by default.
 function _resetForTests() {
   _started = false;
@@ -225,10 +291,20 @@ function _resetForTests() {
 }
 
 module.exports = {
+  // Lifecycle.
   start,
   stop,
   isStarted,
   considerOrder,
+  // Consent surface — public API. Production callers (CLI runAtp,
+  // cliAutobuyPrompt, the daemon run loop) MUST use these, not the
+  // __internals duplicates below, so the "test-only" contract on
+  // __internals stays honest (Bugbot PR #141 R6).
+  getConsent,
+  setConsent,
+  getAckPath: _ackPath,
+  readAck: _readAck,
+  ACK_FILENAME,
   // Exposed for tests and diagnostics only; callers should not depend on
   // these internals in production code paths.
   __internals: {
@@ -237,12 +313,15 @@ module.exports = {
     questionHash: _questionHash,
     effectiveCap: _effectiveCap,
     resetForTests: _resetForTests,
+    ackPath: _ackPath,
+    readAck: _readAck,
     constants: {
       DEFAULT_DAILY_CAP,
       DEFAULT_PER_ORDER_CAP,
       COLD_START_WINDOW_MS,
       DEDUP_TTL_MS,
       LEDGER_FILENAME,
+      ACK_FILENAME,
     },
   },
 };

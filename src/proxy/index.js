@@ -4,7 +4,7 @@ const { getEvomapPath } = require('../gep/paths');
 const { MailboxStore } = require('./mailbox/store');
 const { ProxyHttpServer } = require('./server/http');
 const { buildRoutes } = require('./server/routes');
-const { buildMessagesHandler } = require('./router/messages_route');
+const { buildMessagesHandler, canonicalizeForBedrock } = require('./router/messages_route');
 const { SyncEngine } = require('./sync/engine');
 const { LifecycleManager } = require('./lifecycle/manager');
 const { TaskMonitor } = require('./task/monitor');
@@ -323,7 +323,13 @@ class EvoMapProxy {
       InvokeModelWithResponseStreamCommand,
     } = this._bedrockSdk;
 
-    const modelId = body && typeof body.model === 'string' ? body.model : null;
+    // Defense-in-depth: when router is disabled (EVOMAP_ROUTER_ENABLED!=1)
+    // the router handler skips the body-rewrite step, so a short inbound ID
+    // would otherwise reach Bedrock InvokeModel and trigger ValidationException.
+    // Re-canonicalize here; idempotent for already-canonical IDs from the
+    // router-enabled path.
+    const rawModel = body && typeof body.model === 'string' ? body.model : null;
+    const modelId = rawModel ? canonicalizeForBedrock(rawModel) : null;
     if (!modelId) {
       const errBody = JSON.stringify({
         type: 'error',
@@ -347,9 +353,13 @@ class EvoMapProxy {
     // Bedrock infers stream-vs-not from the command, not the body field.
     delete upstreamBody.stream;
 
-    // Claude Code v2.1.150+ sends `thinking: { type: 'adaptive' }` for Opus
-    // 4.7+. Bedrock InvokeModel only accepts 'enabled' | 'disabled' on the
-    // 4.5/4.1 generation deployed there, returning 400. Fold 'adaptive':
+    // Claude Code v2.1.150+ sends `thinking: { type: 'adaptive' }` plus
+    // `output_config.effort` for Opus 4.7+. Keep that shape for 4.7 models:
+    // folding it to `enabled` makes the current 4.7 endpoint reject compaction
+    // with: "thinking.type.enabled is not supported for this model".
+    //
+    // Older Bedrock-deployed 4.5/4.1 generation models only accept
+    // 'enabled' | 'disabled'. Fold 'adaptive' for those older models:
     //
     // Two hard constraints collide:
     //   - Anthropic: budget_tokens >= 1024 when thinking is enabled
@@ -360,7 +370,12 @@ class EvoMapProxy {
     // thinking entirely on those calls — fold to 'disabled'. For larger
     // max_tokens we default to max_tokens/2 (the model picks budget in
     // adaptive mode, but Bedrock 'enabled' requires the field).
-    if (upstreamBody.thinking && upstreamBody.thinking.type === 'adaptive') {
+    const modelSupportsAdaptiveThinking = /claude-(opus|sonnet|haiku)-4-7\b/.test(modelId);
+    if (
+      !modelSupportsAdaptiveThinking
+      && upstreamBody.thinking
+      && upstreamBody.thinking.type === 'adaptive'
+    ) {
       const maxTokens = typeof upstreamBody.max_tokens === 'number' ? upstreamBody.max_tokens : 8192;
       const haveBudget = typeof upstreamBody.thinking.budget_tokens === 'number';
       if (!haveBudget && maxTokens <= 1024) {
@@ -374,15 +389,20 @@ class EvoMapProxy {
       }
     }
 
-    // Claude Code v2.1.150+ adds top-level fields the Anthropic API accepts
-    // but Bedrock InvokeModel doesn't ("Extra inputs are not permitted"):
+    // Claude Code v2.1.150+ adds top-level fields. Keep output_config for
+    // 4.7 adaptive thinking, where it controls effort; older Bedrock schemas
+    // reject it as an extra input.
+    //
     //   - output_config: { effort }      (when effortLevel is set)
     //   - context_management: { ... }    (auto context window management)
     // Bedrock's strict schema means any unknown top-level field 400s the
     // whole call, so strip the known CC additions before forwarding. New CC
     // fields will surface as 400s and need to be added here.
-    for (const k of ['output_config', 'context_management']) {
+    for (const k of ['context_management']) {
       if (k in upstreamBody) delete upstreamBody[k];
+    }
+    if (!modelSupportsAdaptiveThinking && 'output_config' in upstreamBody) {
+      delete upstreamBody.output_config;
     }
 
     // Cache the BedrockRuntimeClient across requests so its connection

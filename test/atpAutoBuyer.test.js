@@ -50,9 +50,12 @@ afterEach(() => {
 });
 
 describe('autoBuyer.start gating', () => {
-  it('starts when EVOLVER_ATP_AUTOBUY is unset (default on)', () => {
+  it('starts with default-on when EVOLVER_ATP_AUTOBUY is unset and no ack file', () => {
     autoBuyer.start({ dailyCap: 50, perOrderCap: 10 });
     assert.equal(autoBuyer.isStarted(), true);
+    const consent = autoBuyer.getConsent();
+    assert.equal(consent.enabled, true);
+    assert.equal(consent.source, 'default');
   });
 
   it('does not start when EVOLVER_ATP_AUTOBUY=off', () => {
@@ -61,10 +64,48 @@ describe('autoBuyer.start gating', () => {
     assert.equal(autoBuyer.isStarted(), false);
   });
 
-  it('starts when EVOLVER_ATP_AUTOBUY=on', () => {
+  it('starts when EVOLVER_ATP_AUTOBUY=on (explicit env opt-in)', () => {
     process.env.EVOLVER_ATP_AUTOBUY = 'on';
     autoBuyer.start({ dailyCap: 50, perOrderCap: 10 });
     assert.equal(autoBuyer.isStarted(), true);
+    assert.equal(autoBuyer.getConsent().source, 'env');
+  });
+
+  it('starts when ack file enabled=true (CLI opt-in via `evolver atp enable`)', () => {
+    autoBuyer.setConsent(true);
+    autoBuyer.start({ dailyCap: 50, perOrderCap: 10 });
+    assert.equal(autoBuyer.isStarted(), true);
+    assert.equal(autoBuyer.getConsent().source, 'ack');
+  });
+
+  it('does not start when ack file enabled=false (explicit opt-out)', () => {
+    autoBuyer.setConsent(false);
+    autoBuyer.start({ dailyCap: 50, perOrderCap: 10 });
+    assert.equal(autoBuyer.isStarted(), false);
+    const consent = autoBuyer.getConsent();
+    assert.equal(consent.enabled, false);
+    assert.equal(consent.source, 'ack');
+  });
+
+  it('env override wins over ack file', () => {
+    autoBuyer.setConsent(true);
+    process.env.EVOLVER_ATP_AUTOBUY = 'off';
+    autoBuyer.start({ dailyCap: 50, perOrderCap: 10 });
+    assert.equal(autoBuyer.isStarted(), false);
+    assert.equal(autoBuyer.getConsent().source, 'env');
+  });
+
+  it('whitespace-only env value is treated as unset (falls through to default)', () => {
+    // Bugbot PR #141 Medium: getConsent and classify() must agree on what
+    // "unset" means. Whitespace-only should fall through to ack/default
+    // instead of entering the env branch and trimming to '' (which would
+    // mismatch 'off'/'0'/'false' and return source='env').
+    process.env.EVOLVER_ATP_AUTOBUY = '   ';
+    autoBuyer.start({ dailyCap: 50, perOrderCap: 10 });
+    assert.equal(autoBuyer.isStarted(), true);
+    const consent = autoBuyer.getConsent();
+    assert.equal(consent.enabled, true);
+    assert.equal(consent.source, 'default');
   });
 
   it('start is idempotent', () => {

@@ -92,6 +92,25 @@ describe('EvoMapProxy._proxyBedrock', () => {
     assert.equal(sentBody.max_tokens, 16);
   });
 
+  it('normalizes Claude Code bare model aliases before sending to Bedrock', async () => {
+    const mock = makeMockSdk({
+      invoke: () => ({ body: Buffer.from('{}') }),
+      stream: () => { throw new Error('should not be called'); },
+    });
+    proxy._bedrockSdk = mock.sdk;
+
+    await proxy._proxyBedrock('/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 16,
+    }, { bedrockCredentials: { accessKeyId: 't', secretAccessKey: 't' } });
+
+    assert.equal(
+      mock.inspect().lastCommand.input.modelId,
+      'global.anthropic.claude-haiku-4-5-20251001-v1:0'
+    );
+  });
+
   it('non-stream: missing body.model returns 400 Anthropic-shaped error', async () => {
     proxy._bedrockSdk = makeMockSdk({
       invoke: () => { throw new Error('should not be called'); },
@@ -227,7 +246,12 @@ describe('EvoMapProxy._proxyBedrock', () => {
     assert.equal(result.status, 500);
   });
 
-  it('inference profile ID transparently passes through as modelId', async () => {
+  it('us.* dated Bedrock IDs canonicalize to the global.* equivalent at proxy boundary', async () => {
+    // PR #135 made `canonicalizeForBedrock` rewrite `us.*` → `global.*` so a
+    // client carrying a regional inference profile doesn't end up pinned to
+    // it. That canonicalize is now applied at the proxy boundary as well so
+    // the rewrite is consistent whether or not the router-decision step is
+    // enabled (defense-in-depth for EVOMAP_ROUTER_ENABLED=0 deployments).
     const mock = makeMockSdk({
       invoke: () => ({ body: Buffer.from(JSON.stringify({ ok: true })) }),
       stream: () => { throw new Error('should not be called'); },
@@ -240,7 +264,7 @@ describe('EvoMapProxy._proxyBedrock', () => {
     }, { bedrockCredentials: { accessKeyId: 't', secretAccessKey: 't' } });
 
     const { lastCommand } = mock.inspect();
-    assert.equal(lastCommand.input.modelId, 'us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    assert.equal(lastCommand.input.modelId, 'global.anthropic.claude-haiku-4-5-20251001-v1:0');
   });
 
   it('client constructor receives region + endpoint + credentials from opts', async () => {
@@ -429,6 +453,27 @@ describe('EvoMapProxy._proxyBedrock', () => {
     const sent = JSON.parse(mock.inspect().lastCommand.input.body);
     assert.equal(sent.thinking.type, 'enabled');
     assert.equal(sent.thinking.budget_tokens, 800);
+  });
+
+  it('thinking: adaptive and output_config pass through for Opus 4.7', async () => {
+    const mock = makeMockSdk({
+      invoke: () => ({ body: Buffer.from('{}') }),
+      stream: () => { throw new Error('should not be called'); },
+    });
+    proxy._bedrockSdk = mock.sdk;
+    await proxy._proxyBedrock('/v1/messages', {
+      model: 'global.anthropic.claude-opus-4-7',
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: 'compact this session' }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'xhigh' },
+      context_management: { edits: [] },
+    }, { bedrockCredentials: { accessKeyId: 't', secretAccessKey: 't' } });
+
+    const sent = JSON.parse(mock.inspect().lastCommand.input.body);
+    assert.deepEqual(sent.thinking, { type: 'adaptive' });
+    assert.deepEqual(sent.output_config, { effort: 'xhigh' });
+    assert.equal('context_management' in sent, false, 'context_management must still be stripped');
   });
 
   // CC v2.1.150+ adds top-level fields Bedrock InvokeModel doesn't accept;

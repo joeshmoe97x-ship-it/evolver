@@ -118,6 +118,27 @@ function parseVerifyArgs(args) {
   return { ok: true, opts: { orderId, action } };
 }
 
+// `evolver atp <enable|disable|status>` — manage autoBuyer consent ack file.
+// Non-TTY users (daemon, CI, hooks) opt in here instead of the interactive
+// first-run prompt. Returns { ok, opts: { sub } } or { ok: false, error }.
+function parseAtpArgs(args) {
+  if (!Array.isArray(args) || args.length === 0) {
+    return { ok: false, error: 'atp requires <enable|disable|status>' };
+  }
+  let sub = null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (typeof a === 'string' && !a.startsWith('--')) {
+      sub = a.toLowerCase();
+      break;
+    }
+  }
+  if (!sub || !['enable', 'disable', 'status'].includes(sub)) {
+    return { ok: false, error: 'atp subcommand must be enable|disable|status (got: ' + sub + ')' };
+  }
+  return { ok: true, opts: { sub } };
+}
+
 async function runBuy(opts, deps) {
   const atp = (deps && deps.atp) || require('./index');
   const consumerAgent = atp.consumerAgent;
@@ -226,6 +247,80 @@ async function runVerify(opts, deps) {
   }
 }
 
+// Subcommand runner for `evolver atp enable|disable|status`. Writes the ack
+// file via autoBuyer.setConsent so subsequent daemon starts pick it up. Does
+// NOT mutate process.env — env override wins over the ack file by design,
+// and we don't want a transient CLI invocation to silently shadow operator
+// shell config.
+// Detect whether an EVOLVER_ATP_AUTOBUY env override is currently set AND
+// would supersede the ack we are about to write. Returns the effective env
+// boolean (true=on, false=off) or null if env is unset / whitespace-only.
+// Mirrors the trim-before-length-check rule from autoBuyer.getConsent so
+// the CLI and the runtime agree on what "set" means (Bugbot PR #141).
+function _envOverride() {
+  const raw = process.env.EVOLVER_ATP_AUTOBUY;
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (s.length === 0) return null;
+  return !(s === 'off' || s === '0' || s === 'false');
+}
+
+async function runAtp(opts, deps) {
+  const autoBuyer = (deps && deps.autoBuyer) || require('./autoBuyer');
+  const log = (deps && deps.log) || console.log;
+  const err = (deps && deps.err) || console.error;
+
+  try {
+    if (opts.sub === 'enable') {
+      const body = autoBuyer.setConsent(true);
+      log('[ATP] auto-spend ENABLED (consent recorded ' + body.acknowledged_at + ').');
+      log('      Caps: daily=' + (process.env.ATP_AUTOBUY_DAILY_CAP_CREDITS || '50') +
+          ', per-order=' + (process.env.ATP_AUTOBUY_PER_ORDER_CAP_CREDITS || '10') + ' credits.');
+      log('      Disable: evolver atp disable  (or  EVOLVER_ATP_AUTOBUY=off)');
+      // Loud warning if an env override will silently undo the ack at
+      // runtime. Bugbot PR #141 Medium: without this the user gets a
+      // false confirmation and real credits keep flowing the wrong way.
+      const envEnabled = _envOverride();
+      if (envEnabled === false) {
+        log('');
+        log('[ATP] WARNING: EVOLVER_ATP_AUTOBUY=' + process.env.EVOLVER_ATP_AUTOBUY +
+            ' is set in your environment and will OVERRIDE the ack file at runtime.');
+        log('      Auto-spend will stay OFF until you unset it (env wins over the ack file).');
+        return { exitCode: 0, data: body, envOverride: 'off' };
+      }
+      return { exitCode: 0, data: body };
+    }
+    if (opts.sub === 'disable') {
+      const body = autoBuyer.setConsent(false);
+      log('[ATP] auto-spend DISABLED (consent recorded ' + body.acknowledged_at + ').');
+      log('      Re-enable: evolver atp enable');
+      const envEnabled = _envOverride();
+      if (envEnabled === true) {
+        log('');
+        log('[ATP] WARNING: EVOLVER_ATP_AUTOBUY=' + process.env.EVOLVER_ATP_AUTOBUY +
+            ' is set in your environment and will OVERRIDE the ack file at runtime.');
+        log('      Auto-spend will stay ON (and continue charging credits) until you unset it.');
+        return { exitCode: 0, data: body, envOverride: 'on' };
+      }
+      return { exitCode: 0, data: body };
+    }
+    // status
+    const consent = autoBuyer.getConsent();
+    const ackPath = autoBuyer.getAckPath();
+    log('[ATP] auto-spend: ' + (consent.enabled ? 'ENABLED' : 'DISABLED') +
+        '  (source: ' + consent.source + ')');
+    log('      ack file: ' + ackPath);
+    if (consent.source === 'default') {
+      log('      Default policy (no ack file, no env override). Run `evolver atp disable`');
+      log('      to opt out, or `evolver atp enable` to record explicit opt-in.');
+    }
+    return { exitCode: 0, data: consent };
+  } catch (e) {
+    err('[ATP] atp command error: ' + (e && e.message || e));
+    return { exitCode: 1, error: String(e) };
+  }
+}
+
 function printUsage() {
   return [
     'ATP subcommands:',
@@ -234,6 +329,7 @@ function printUsage() {
     '  evolver orders [--role=consumer|merchant] [--status=pending|verified|disputed|settled]',
     '                 [--limit=N] [--json]',
     '  evolver verify <orderId> [--action=confirm|ai_judge]',
+    '  evolver atp <enable|disable|status>   -- manage auto-spend consent',
   ].join('\n');
 }
 
@@ -241,8 +337,10 @@ module.exports = {
   parseBuyArgs,
   parseOrdersArgs,
   parseVerifyArgs,
+  parseAtpArgs,
   runBuy,
   runOrders,
   runVerify,
+  runAtp,
   printUsage,
 };

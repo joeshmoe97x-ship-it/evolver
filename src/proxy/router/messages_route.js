@@ -28,8 +28,8 @@ const { extractFeatures } = require('./features');
 //                   inbound sonnet-4-7 → sonnet-4-6 rewrite, so callers
 //                   pinned to 4-7 stay on 4-7.
 const DEFAULT_TIER_MODELS = Object.freeze({
-  cheap: 'global.anthropic.claude-haiku-4-5-20251001-v1:0',
-  mid: 'global.anthropic.claude-sonnet-4-6',
+  cheap: 'global.anthropic.claude-opus-4-7',
+  mid: 'global.anthropic.claude-opus-4-7',
   expensive: 'global.anthropic.claude-opus-4-7',
 });
 
@@ -64,6 +64,28 @@ function isIntraFamilyDowngrade(chosen, original) {
   if (c.family !== o.family) return false;
   if (c.major !== o.major) return c.major < o.major;
   return c.minor < o.minor;
+}
+
+// Bedrock InvokeModel rejects bare short IDs like `claude-opus-4-7` with
+// ValidationException — it only accepts the explicit ARN-shaped aliases
+// below. CC clients and many SDKs route via short IDs since that's what
+// api.anthropic.com expects, so when upstreamMode === 'bedrock' we
+// canonicalize at the proxy boundary. Unknown / non-Claude IDs pass
+// through untouched (Bedrock owns the rejection in that case).
+//
+// Map keys are `family/major/minor` from parseClaudeId. Add new entries
+// here as Anthropic ships new Bedrock aliases.
+const KNOWN_BEDROCK_ALIASES = Object.freeze({
+  'opus/4/7': 'global.anthropic.claude-opus-4-7',
+  'haiku/4/5': 'global.anthropic.claude-haiku-4-5-20251001-v1:0',
+  'sonnet/4/6': 'global.anthropic.claude-sonnet-4-6',
+});
+
+function canonicalizeForBedrock(modelId) {
+  const parsed = parseClaudeId(modelId);
+  if (!parsed) return modelId;
+  const key = `${parsed.family}/${parsed.major}/${parsed.minor}`;
+  return KNOWN_BEDROCK_ALIASES[key] || modelId;
 }
 
 function resolveTierModels() {
@@ -111,7 +133,19 @@ function buildMessagesHandler({ anthropicProxy, logger, routerEnabled } = {}) {
       }
     }
 
-    const originalModel = body && typeof body.model === 'string' ? body.model : null;
+    // Phase C ABC fix: in bedrock mode, normalize the inbound model to the
+    // Bedrock-resolvable form up front. Client-side IDs like
+    // `claude-opus-4-7` are valid on api.anthropic.com but Bedrock's
+    // InvokeModel rejects them with ValidationException; the retry path
+    // would replay that exact rejected ID and turn an upstream blip into
+    // 100% failure. Canonicalizing here makes router decisions, the
+    // outbound rewrite, the no-downgrade comparison, and the retry body
+    // all see the same Bedrock-OK ID. anthropic mode passes through
+    // unchanged so api.anthropic.com keeps accepting short IDs.
+    const rawInboundModel = body && typeof body.model === 'string' ? body.model : null;
+    const originalModel = upstreamMode === 'bedrock'
+      ? canonicalizeForBedrock(rawInboundModel)
+      : rawInboundModel;
     let chosenModel = originalModel;
     let decisionTier = null;
     let decisionReason = null;
@@ -159,7 +193,12 @@ function buildMessagesHandler({ anthropicProxy, logger, routerEnabled } = {}) {
     }
 
     let outboundBody = body;
-    if (enabled && chosenModel && chosenModel !== originalModel) {
+    // Rewrite the outbound body when chosenModel differs from what the
+    // CLIENT actually sent (rawInboundModel), not just from the canonical
+    // originalModel. Otherwise bedrock-mode short-ID inbounds where the
+    // router didn't change tier (chosenModel === canonical(rawInbound))
+    // would forward the original body — leaking the short ID to Bedrock.
+    if (enabled && chosenModel && chosenModel !== rawInboundModel) {
       try {
         outboundBody = rewriteModel(body, chosenModel);
       } catch (err) {
@@ -242,7 +281,41 @@ function buildMessagesHandler({ anthropicProxy, logger, routerEnabled } = {}) {
       // restore it on the throw path.
       let drainedFirst = '';
       if (upstream.text) {
-        try { drainedFirst = await upstream.text(); } catch { /* socket already gone */ }
+        // Bound response-body drain to 10s to prevent hanging on large or
+        // slow-streaming error responses. If the drain times out, log it
+        // but continue — the original 5xx is still cached and will be
+        // returned to the caller if the retry throws.
+        //
+        // Clear the timer when text() resolves first, otherwise the
+        // setTimeout sits in the event loop for 10s holding a closure
+        // reference. Under sustained 5xx storms (the exact scenario this
+        // branch targets) one such timer per retry would accumulate.
+        let drainTimer;
+        try {
+          drainedFirst = await Promise.race([
+            upstream.text(),
+            new Promise((_, reject) => {
+              drainTimer = setTimeout(
+                () => reject(new Error('response drain timeout')),
+                10_000,
+              );
+            }),
+          ]);
+        } catch (e) {
+          // socket already gone, timeout, or parse error. Log drain errors
+          // and continue with empty body — the retry response will carry the
+          // actual error to the caller.
+          if (e?.message?.includes('timeout')) {
+            log.warn?.(JSON.stringify({
+              event: 'router_fallback',
+              reason: 'upstream_5xx_drain_timeout',
+              original_model: originalModel,
+              would_have_been: chosenModel,
+            }));
+          }
+        } finally {
+          if (drainTimer) clearTimeout(drainTimer);
+        }
       }
       try {
         const retryBody = rewriteModel(body, originalModel);
@@ -317,4 +390,6 @@ module.exports = {
   resolveTierModels,
   parseClaudeId,
   isIntraFamilyDowngrade,
+  canonicalizeForBedrock,
+  KNOWN_BEDROCK_ALIASES,
 };

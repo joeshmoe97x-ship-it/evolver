@@ -1,6 +1,6 @@
 'use strict';
 
-const { describe, it } = require('node:test');
+const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
 const { buildMessagesHandler } = require('../src/proxy/router/messages_route');
@@ -33,6 +33,28 @@ function makeLogger() {
 }
 
 describe('Phase C slice 6 — EVOMAP_ROUTER_ENABLED gating + router_decision log', () => {
+  // Hermetic tier-model env: pin the per-tier env vars so this suite stays
+  // green regardless of what DEFAULT_TIER_MODELS happens to be on main.
+  // Operators sometimes run "all tiers point to one model" while tuning;
+  // those are valid daemon configs but break tier-distinguishing tests.
+  let prevCheap, prevMid, prevExpensive;
+  before(() => {
+    prevCheap = process.env.EVOMAP_MODEL_CHEAP;
+    prevMid = process.env.EVOMAP_MODEL_MID;
+    prevExpensive = process.env.EVOMAP_MODEL_EXPENSIVE;
+    process.env.EVOMAP_MODEL_CHEAP = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
+    process.env.EVOMAP_MODEL_MID = 'global.anthropic.claude-sonnet-4-6';
+    process.env.EVOMAP_MODEL_EXPENSIVE = 'global.anthropic.claude-opus-4-7';
+  });
+  after(() => {
+    if (prevCheap === undefined) delete process.env.EVOMAP_MODEL_CHEAP;
+    else process.env.EVOMAP_MODEL_CHEAP = prevCheap;
+    if (prevMid === undefined) delete process.env.EVOMAP_MODEL_MID;
+    else process.env.EVOMAP_MODEL_MID = prevMid;
+    if (prevExpensive === undefined) delete process.env.EVOMAP_MODEL_EXPENSIVE;
+    else process.env.EVOMAP_MODEL_EXPENSIVE = prevExpensive;
+  });
+
   it('forwards body unmodified when routerEnabled=false (default)', async () => {
     const { fn, calls } = makeStubProxy();
     const logger = makeLogger();

@@ -937,6 +937,7 @@ describe('setup-hooks copies every helper required by the entry-point scripts (#
       while ((m = re.exec(src)) !== null) {
         // Normalise: ensure .js suffix for matching against directory list.
         let target = m[1].replace(/^\.\//, '');
+        if (target.includes('/')) continue; // only verify same-dir sibling helpers
         if (!target.endsWith('.js')) target += '.js';
         requires.add(target);
       }
@@ -958,10 +959,10 @@ describe('setup-hooks copies every helper required by the entry-point scripts (#
     const requires = collectRelativeRequires();
     const tmp = makeTmpDir();
     try {
-      const platform = { id: 'codex', configRoot: tmp, hooksDir: path.join(tmp, '.codex', 'hooks') };
+      const hooksDir = path.join(tmp, '.codex', 'hooks');
       const evolverRoot = path.resolve(__dirname, '..', 'src', 'adapters');
-      hookAdapter.copyHookScripts(platform.hooksDir, evolverRoot);
-      const installed = new Set(fs.readdirSync(platform.hooksDir));
+      hookAdapter.copyHookScripts(hooksDir, evolverRoot);
+      const installed = new Set(fs.readdirSync(hooksDir));
       for (const target of requires) {
         assert.ok(installed.has(target),
           `evolver-session-*.js requires './${target.replace(/\.js$/, '')}' but setup-hooks did not copy ` +

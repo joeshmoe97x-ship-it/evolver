@@ -127,7 +127,7 @@ describe("cliAutobuyPrompt", () => {
     assert.equal(res.reason, "ack_present");
   });
 
-  it("on answer='y' writes ack enabled=true and flips env to on", async () => {
+  it("on answer='y' writes ack enabled=true (does NOT mutate env)", async () => {
     const mod = freshModule();
     const output = collectingStream();
     const env = { ...process.env };
@@ -142,14 +142,16 @@ describe("cliAutobuyPrompt", () => {
 
     assert.equal(res.prompted, true);
     assert.equal(res.decision, "yes");
-    assert.equal(env.EVOLVER_ATP_AUTOBUY, "on");
+    // env is left untouched: autoBuyer.getConsent() reads the ack file
+    // directly and only falls back to env when no ack exists.
+    assert.equal(env.EVOLVER_ATP_AUTOBUY, undefined);
     const ack = JSON.parse(fs.readFileSync(mod.__internals._getAckPath(), "utf8"));
     assert.equal(ack.enabled, true);
     assert.equal(ack.version, 1);
     assert.match(output.read(), /\[ATP-AutoBuyer\]/);
   });
 
-  it("on answer='n' writes ack enabled=false and flips env to off", async () => {
+  it("on answer='n' writes ack enabled=false (does NOT mutate env)", async () => {
     const mod = freshModule();
     const output = collectingStream();
     const env = { ...process.env };
@@ -164,7 +166,7 @@ describe("cliAutobuyPrompt", () => {
 
     assert.equal(res.prompted, true);
     assert.equal(res.decision, "no");
-    assert.equal(env.EVOLVER_ATP_AUTOBUY, "off");
+    assert.equal(env.EVOLVER_ATP_AUTOBUY, undefined);
     const ack = JSON.parse(fs.readFileSync(mod.__internals._getAckPath(), "utf8"));
     assert.equal(ack.enabled, false);
   });
@@ -195,6 +197,51 @@ describe("cliAutobuyPrompt", () => {
     });
     assert.equal(res2.decision, "later");
     assert.equal(fs.existsSync(mod.__internals._getAckPath()), false);
+  });
+
+  it("on ack write failure: surfaces WARN and returns reason='ack_write_failed'", async () => {
+    // Bugbot PR #141 Medium: unchecked ack write would silently lose the
+    // user's explicit opt-in. Simulate FS failure by pointing MEMORY_DIR at
+    // a file (so mkdirSync inside setConsent → ENOTDIR or similar).
+    const collidingPath = path.join(tmpMemoryDir, "is-a-file-not-a-dir");
+    fs.writeFileSync(collidingPath, "x");
+    process.env.MEMORY_DIR = collidingPath;
+
+    const mod = freshModule();
+    const output = collectingStream();
+    const env = { ...process.env };
+    delete env.EVOLVER_ATP_AUTOBUY;
+
+    const res = await mod.runPrompt({
+      input: makeTTY("y"),
+      output,
+      env,
+      ask: async () => "y",
+    });
+
+    assert.equal(res.prompted, true);
+    assert.equal(res.decision, "yes", "decision still reflects what the user typed");
+    assert.equal(res.reason, "ack_write_failed", "reason flags the persistence failure");
+    assert.match(output.read(), /failed to persist consent/i);
+    assert.match(output.read(), /evolver atp enable/);
+  });
+
+  it("corrupted ack file does NOT permanently suppress prompt (Bugbot R3)", async () => {
+    // Bugbot PR #141 Low: classify previously accepted any parsed object as
+    // "ack_present" (suppressing prompt forever) while autoBuyer.getConsent
+    // rejected non-boolean `enabled` (returning no_consent). User stuck:
+    // no prompt + autoBuyer off. Both readers now share the strict check;
+    // corrupted ack → both treat as absent → prompt re-fires.
+    const mod = freshModule();
+    fs.mkdirSync(tmpMemoryDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpMemoryDir, mod.__internals.ACK_FILE_NAME),
+      JSON.stringify({ enabled: "yes", acknowledged_at: "x", version: 1 }),
+    );
+
+    // classify must NOT return ack_present — corrupted file is treated as
+    // absent so the user gets another chance.
+    assert.equal(mod.classify({}, makeTTY("y")), "eligible");
   });
 
   it("classify() returns the precedence order (env_set > non_tty > ack > eligible)", async () => {

@@ -491,10 +491,11 @@ async function main() {
           console.warn('[ATP] Auto-init failed: ' + (atpInitErr && atpInitErr.message || atpInitErr));
         }
 
-        // ATP: capability-gap auto-buyer. Default ON as of ATP liquidity
-        // unlock; disable with EVOLVER_ATP_AUTOBUY=off. Also starts the
-        // merchant-side auto-deliver daemon so claimed ATP tasks actually
-        // call submitDelivery and settle instead of expiring.
+        // ATP: capability-gap auto-buyer. OPT-IN as of consent-required
+        // change — new installs do not auto-spend until the user explicitly
+        // runs `evolver atp enable` or answers `y` at the first-run prompt.
+        // Also starts the merchant-side auto-deliver daemon so claimed ATP
+        // tasks actually call submitDelivery and settle instead of expiring.
         try {
           try {
             const { runPrompt } = require('./src/atp/cliAutobuyPrompt');
@@ -502,16 +503,31 @@ async function main() {
           } catch (promptErr) {
             console.warn('[ATP-AutoBuyer] first-run prompt failed: ' + (promptErr && promptErr.message || promptErr));
           }
-          const autoBuyRaw = (process.env.EVOLVER_ATP_AUTOBUY || 'on').toLowerCase().trim();
-          const autoBuyOn = autoBuyRaw !== 'off' && autoBuyRaw !== '0' && autoBuyRaw !== 'false';
-          if (autoBuyOn) {
+          const { autoBuyer } = require('./src/atp');
+          const consent = autoBuyer.getConsent();
+          if (consent.enabled) {
             const hubUrl = process.env.A2A_HUB_URL || process.env.EVOMAP_HUB_URL || '';
             if (hubUrl) {
-              const { autoBuyer } = require('./src/atp');
               autoBuyer.start({
                 dailyCap: Number(process.env.ATP_AUTOBUY_DAILY_CAP_CREDITS) || undefined,
                 perOrderCap: Number(process.env.ATP_AUTOBUY_PER_ORDER_CAP_CREDITS) || undefined,
               });
+              if (consent.source === 'default') {
+                // First-run on a non-TTY (daemon, hook, CI) where the prompt
+                // could not fire AND no env override + no ack file. autoBuyer
+                // is starting with the default-on policy — surface a single
+                // WARN per process so users see what is happening and how to
+                // opt out, instead of discovering it via a credit balance dip.
+                let safeHubUrl;
+                try { safeHubUrl = new URL(hubUrl).origin; }
+                catch { safeHubUrl = '(configured)'; }
+                console.warn('[ATP-AutoBuyer] ATP auto-spend is ON (default for new installs).');
+                console.warn('               Hub: ' + safeHubUrl + '  Caps: ' +
+                  (process.env.ATP_AUTOBUY_DAILY_CAP_CREDITS || '50') + ' credits/day, ' +
+                  (process.env.ATP_AUTOBUY_PER_ORDER_CAP_CREDITS || '10') + '/order' +
+                  ' (cold-start half-cap for the first 5 min).');
+                console.warn('               To opt out: evolver atp disable  (or EVOLVER_ATP_AUTOBUY=off)');
+              }
             } else {
               console.warn('[ATP-AutoBuyer] autobuy enabled but no hub URL configured, skipping.');
             }
@@ -1815,7 +1831,7 @@ async function main() {
       process.exit(1);
     }
 
-  } else if (command === 'buy' || command === 'orders' || command === 'verify') {
+  } else if (command === 'buy' || command === 'orders' || command === 'verify' || command === 'atp') {
     try {
       const atpCli = require('./src/atp/cli');
       const subArgs = args.slice(1); // drop the command token (e.g. "buy") itself
@@ -1827,9 +1843,12 @@ async function main() {
       } else if (command === 'orders') {
         parsed = atpCli.parseOrdersArgs(subArgs);
         runner = atpCli.runOrders;
-      } else {
+      } else if (command === 'verify') {
         parsed = atpCli.parseVerifyArgs(subArgs);
         runner = atpCli.runVerify;
+      } else {
+        parsed = atpCli.parseAtpArgs(subArgs);
+        runner = atpCli.runAtp;
       }
       if (!parsed.ok) {
         console.error('[ATP] ' + parsed.error);
@@ -1844,7 +1863,7 @@ async function main() {
     }
 
   } else {
-    console.log(`Usage: node index.js [run|/evolve|solidify|review|distill|fetch|sync|asset-log|webui|setup-hooks|buy|orders|verify|atp-complete] [--loop]
+    console.log(`Usage: node index.js [run|/evolve|solidify|review|distill|fetch|sync|asset-log|webui|setup-hooks|buy|orders|verify|atp|atp-complete] [--loop]
   - fetch flags:
     - --skill=<id> | -s <id>   (skill ID to download)
     - --out=<dir>              (output directory, default: ./skills/<skill_id>)

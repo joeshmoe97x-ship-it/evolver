@@ -245,3 +245,80 @@ describe('cli.runVerify wiring', () => {
     assert.deepEqual(captured, [['ai_judge', 'ord_456']]);
   });
 });
+
+describe('cli.runAtp env override warning (Bugbot PR #141 R4)', () => {
+  function fakeAutoBuyer() {
+    return {
+      setConsent: (enabled) => ({ enabled, acknowledged_at: '2026-05-27T00:00:00Z', version: 1 }),
+      getConsent: () => ({ enabled: true, source: 'default' }),
+      __internals: { ackPath: () => '/tmp/fake-ack.json' },
+    };
+  }
+
+  function captureLog() {
+    const lines = [];
+    return { log: (s) => lines.push(String(s)), err: () => {}, read: () => lines.join('\n') };
+  }
+
+  it('enable: warns when EVOLVER_ATP_AUTOBUY=off would override the ack', async () => {
+    const prev = process.env.EVOLVER_ATP_AUTOBUY;
+    process.env.EVOLVER_ATP_AUTOBUY = 'off';
+    try {
+      const io = captureLog();
+      const r = await cli.runAtp({ sub: 'enable' }, { autoBuyer: fakeAutoBuyer(), log: io.log, err: io.err });
+      assert.equal(r.exitCode, 0);
+      assert.equal(r.envOverride, 'off');
+      assert.match(io.read(), /WARNING/);
+      assert.match(io.read(), /OVERRIDE/);
+      assert.match(io.read(), /EVOLVER_ATP_AUTOBUY=off/);
+    } finally {
+      if (prev === undefined) delete process.env.EVOLVER_ATP_AUTOBUY;
+      else process.env.EVOLVER_ATP_AUTOBUY = prev;
+    }
+  });
+
+  it('disable: warns when EVOLVER_ATP_AUTOBUY=on would override the ack', async () => {
+    const prev = process.env.EVOLVER_ATP_AUTOBUY;
+    process.env.EVOLVER_ATP_AUTOBUY = 'on';
+    try {
+      const io = captureLog();
+      const r = await cli.runAtp({ sub: 'disable' }, { autoBuyer: fakeAutoBuyer(), log: io.log, err: io.err });
+      assert.equal(r.exitCode, 0);
+      assert.equal(r.envOverride, 'on');
+      assert.match(io.read(), /WARNING/);
+      assert.match(io.read(), /continue charging credits/);
+    } finally {
+      if (prev === undefined) delete process.env.EVOLVER_ATP_AUTOBUY;
+      else process.env.EVOLVER_ATP_AUTOBUY = prev;
+    }
+  });
+
+  it('enable: no warning when env is unset', async () => {
+    const prev = process.env.EVOLVER_ATP_AUTOBUY;
+    delete process.env.EVOLVER_ATP_AUTOBUY;
+    try {
+      const io = captureLog();
+      const r = await cli.runAtp({ sub: 'enable' }, { autoBuyer: fakeAutoBuyer(), log: io.log, err: io.err });
+      assert.equal(r.exitCode, 0);
+      assert.equal(r.envOverride, undefined);
+      assert.doesNotMatch(io.read(), /WARNING/);
+    } finally {
+      if (prev !== undefined) process.env.EVOLVER_ATP_AUTOBUY = prev;
+    }
+  });
+
+  it('disable: no warning when env agrees (off)', async () => {
+    const prev = process.env.EVOLVER_ATP_AUTOBUY;
+    process.env.EVOLVER_ATP_AUTOBUY = 'off';
+    try {
+      const io = captureLog();
+      const r = await cli.runAtp({ sub: 'disable' }, { autoBuyer: fakeAutoBuyer(), log: io.log, err: io.err });
+      assert.equal(r.exitCode, 0);
+      assert.equal(r.envOverride, undefined);
+      assert.doesNotMatch(io.read(), /WARNING/);
+    } finally {
+      if (prev === undefined) delete process.env.EVOLVER_ATP_AUTOBUY;
+      else process.env.EVOLVER_ATP_AUTOBUY = prev;
+    }
+  });
+});

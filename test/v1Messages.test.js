@@ -54,12 +54,19 @@ function startStubAnthropic(handler) {
 describe('POST /v1/messages — router rewrite + egress', () => {
   let proxyServer, anthropicStub, baseUrl, token, captured;
   let savedSettingsDir;
+  let savedCheap, savedMid, savedExpensive;
   let settingsDir;
 
   before(async () => {
     settingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v1msg-settings-'));
     savedSettingsDir = process.env.EVOLVER_SETTINGS_DIR;
     process.env.EVOLVER_SETTINGS_DIR = settingsDir;
+    savedCheap = process.env.EVOMAP_MODEL_CHEAP;
+    savedMid = process.env.EVOMAP_MODEL_MID;
+    savedExpensive = process.env.EVOMAP_MODEL_EXPENSIVE;
+    process.env.EVOMAP_MODEL_CHEAP = 'global.anthropic.claude-haiku-4-5-20251001-v1:0';
+    process.env.EVOMAP_MODEL_MID = 'global.anthropic.claude-sonnet-4-6';
+    process.env.EVOMAP_MODEL_EXPENSIVE = 'global.anthropic.claude-opus-4-7';
     captured = [];
     anthropicStub = await startStubAnthropic((req, res) => {
       const chunks = [];
@@ -183,6 +190,12 @@ describe('POST /v1/messages — router rewrite + egress', () => {
     try { fs.rmSync(settingsDir, { recursive: true }); } catch {}
     if (savedSettingsDir === undefined) delete process.env.EVOLVER_SETTINGS_DIR;
     else process.env.EVOLVER_SETTINGS_DIR = savedSettingsDir;
+    if (savedCheap === undefined) delete process.env.EVOMAP_MODEL_CHEAP;
+    else process.env.EVOMAP_MODEL_CHEAP = savedCheap;
+    if (savedMid === undefined) delete process.env.EVOMAP_MODEL_MID;
+    else process.env.EVOMAP_MODEL_MID = savedMid;
+    if (savedExpensive === undefined) delete process.env.EVOMAP_MODEL_EXPENSIVE;
+    else process.env.EVOMAP_MODEL_EXPENSIVE = savedExpensive;
   });
 
   beforeEach(() => { captured.length = 0; });
