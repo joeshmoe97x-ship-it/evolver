@@ -27,6 +27,7 @@ const https = require('https');
 const crypto = require('crypto');
 
 const { computeAssetId } = require('../gep/contentHash');
+const { enforceHubScheme, strictHttpsAgent } = require('../gep/hubFetch');
 const {
   getNodeId,
   getHubUrl,
@@ -114,6 +115,19 @@ function _publishUrl() {
 
 function _postJson(urlStr, body, timeoutMs) {
   return new Promise(function (resolve) {
+    // Same TLS posture as hubFetch: refuse plain http:// unless
+    // EVOMAP_HUB_ALLOW_INSECURE=1. Before this guard the function
+    // silently fell back to `lib = http` for any non-https URL, so an
+    // operator override `A2A_HUB_URL=http://...` would send /a2a/publish
+    // and /a2a/task/complete in cleartext while hubFetch-routed calls
+    // (e.g. /a2a/verify-solidify) refused the same URL — inconsistent
+    // TLS enforcement across modules.
+    try {
+      enforceHubScheme(urlStr);
+    } catch (e) {
+      resolve({ ok: false, error: 'tls_refused: ' + (e && e.message) });
+      return;
+    }
     let parsed;
     try {
       parsed = new URL(urlStr);
@@ -128,15 +142,28 @@ function _postJson(urlStr, body, timeoutMs) {
       { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
       buildHubHeaders() || {},
     );
+    // Pin TLS cert verification for https calls so a globally-disabled
+    // NODE_TLS_REJECT_UNAUTHORIZED=0 cannot weaken the Hub channel
+    // (Cursor Security Reviewer #160 Medium). hubFetch enforces the
+    // same via its undici dispatcher; this is the Node-native-https
+    // equivalent.
+    //
+    // Skipped under EVOMAP_HUB_ALLOW_INSECURE=1 so local-dev / self-
+    // signed mock hubs that legitimately rely on
+    // NODE_TLS_REJECT_UNAUTHORIZED=0 still work.
+    const requestOpts = {
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: parsed.pathname + (parsed.search || ''),
+      method: 'POST',
+      headers: headers,
+      timeout: timeoutMs || PUBLISH_TIMEOUT_MS,
+    };
+    if (isHttps && process.env.EVOMAP_HUB_ALLOW_INSECURE !== '1') {
+      requestOpts.agent = strictHttpsAgent;
+    }
     const req = lib.request(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port || (isHttps ? 443 : 80),
-        path: parsed.pathname + (parsed.search || ''),
-        method: 'POST',
-        headers: headers,
-        timeout: timeoutMs || PUBLISH_TIMEOUT_MS,
-      },
+      requestOpts,
       function (res) {
         const chunks = [];
         res.on('data', function (c) { chunks.push(c); });

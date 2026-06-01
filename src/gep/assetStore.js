@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { getGepAssetsDir } = require('./paths');
+const { getGepAssetsDir, getBundledGepAssetsDir, getRepoRoot, getSessionScope } = require('./paths');
 const { computeAssetId, SCHEMA_VERSION } = require('./contentHash');
 const { validateGene } = require('./schemas/gene');
 const { validateCapsule } = require('./schemas/capsule');
@@ -203,13 +203,59 @@ function getDefaultGenes() {
 
 function getDefaultCapsules() { return { version: 1, capsules: [] }; }
 function genesPath() { return path.join(getGepAssetsDir(), 'genes.json'); }
-function genesSeedPath() { return path.join(getGepAssetsDir(), 'genes.seed.json'); }
+function genesSeedPath() { return path.join(getBundledGepAssetsDir(), 'genes.seed.json'); }
+function bundledGenesPath() { return path.join(getBundledGepAssetsDir(), 'genes.json'); }
 function capsulesPath() { return path.join(getGepAssetsDir(), 'capsules.json'); }
 function capsulesJsonlPath() { return path.join(getGepAssetsDir(), 'capsules.jsonl'); }
 function eventsPath() { return path.join(getGepAssetsDir(), 'events.jsonl'); }
 function candidatesPath() { return path.join(getGepAssetsDir(), 'candidates.jsonl'); }
 function externalCandidatesPath() { return path.join(getGepAssetsDir(), 'external_candidates.jsonl'); }
 function failedCapsulesPath() { return path.join(getGepAssetsDir(), 'failed_capsules.json'); }
+
+const LEGACY_RUNTIME_FILENAMES = [
+  'genes.json',
+  'capsules.json',
+  'genes.jsonl',
+  'capsules.jsonl',
+  'events.jsonl',
+  'candidates.jsonl',
+  'external_candidates.jsonl',
+  'failed_capsules.json',
+];
+
+function legacyGepAssetsDir() {
+  const baseDir = path.join(getRepoRoot(), 'assets', 'gep');
+  const scope = getSessionScope();
+  if (scope) {
+    return path.join(baseDir, 'scopes', scope);
+  }
+  return baseDir;
+}
+
+function migrateLegacyRuntimeAssets() {
+  if (process.env.GEP_ASSETS_DIR) return;
+  const targetDir = getGepAssetsDir();
+  const legacyDir = legacyGepAssetsDir();
+  if (path.resolve(targetDir) === path.resolve(legacyDir)) return;
+  if (!fs.existsSync(legacyDir)) return;
+
+  let copied = 0;
+  for (const name of LEGACY_RUNTIME_FILENAMES) {
+    const from = path.join(legacyDir, name);
+    const to = path.join(targetDir, name);
+    try {
+      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
+      ensureDir(path.dirname(to));
+      fs.copyFileSync(from, to);
+      copied++;
+    } catch (e) {
+      console.warn('[AssetStore] Failed to migrate legacy GEP asset ' + from + ':', e && e.message || e);
+    }
+  }
+  if (copied > 0) {
+    console.log('[AssetStore] Migrated ' + copied + ' GEP asset file(s) from ' + legacyDir + ' to ' + targetDir);
+  }
+}
 
 // First-run seeding: if the user has no local genes.json yet, copy the
 // shipped genes.seed.json into place so they start with the curated
@@ -218,14 +264,15 @@ function failedCapsulesPath() { return path.join(getGepAssetsDir(), 'failed_caps
 // upgrades from wiping the user's accumulated asset store. See the
 // 2026-05-03 regression report from Ruan Chengtao.
 function ensureGenesSeeded() {
+  migrateLegacyRuntimeAssets();
   const target = genesPath();
   if (fs.existsSync(target)) return;
-  const seed = genesSeedPath();
+  const seed = fs.existsSync(genesSeedPath()) ? genesSeedPath() : bundledGenesPath();
   if (!fs.existsSync(seed)) return;
   try {
     ensureDir(path.dirname(target));
     fs.copyFileSync(seed, target);
-    console.log('[AssetStore] Seeded ' + target + ' from genes.seed.json');
+    console.log('[AssetStore] Seeded ' + target + ' from ' + path.basename(seed));
   } catch (e) {
     console.warn('[AssetStore] Failed to seed genes.json from seed:', e && e.message || e);
   }
@@ -629,7 +676,7 @@ module.exports = {
   upsertGene, appendCapsule, upsertCapsule,
   appendFailedCapsule, readRecentFailedCapsules,
   genesPath, capsulesPath, eventsPath, candidatesPath, externalCandidatesPath, failedCapsulesPath,
-  genesSeedPath, ensureGenesSeeded,
+  genesSeedPath, bundledGenesPath, ensureGenesSeeded, migrateLegacyRuntimeAssets,
   ensureAssetFiles, buildValidationCmd,
   withFileLock,
   readJsonIfExists,

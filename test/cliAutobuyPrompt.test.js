@@ -18,7 +18,13 @@ function freshModule() {
       delete require.cache[k];
     }
   }
-  return require("../src/atp/cliAutobuyPrompt");
+  // Return both the prompt and autoBuyer so tests reach ack-file plumbing
+  // (filename constant + path resolver) through autoBuyer's public surface
+  // instead of duplicated re-exports on cliAutobuyPrompt.__internals
+  // (Bugbot PR #141 R6 follow-up).
+  const prompt = require("../src/atp/cliAutobuyPrompt");
+  const autoBuyer = require("../src/atp/autoBuyer");
+  return Object.assign(prompt, { autoBuyer });
 }
 
 function makeTTY(preset) {
@@ -83,7 +89,7 @@ describe("cliAutobuyPrompt", () => {
     assert.equal(res.reason, "non_tty");
     assert.equal(res.decision, null);
     assert.equal(output.read(), "");
-    assert.equal(fs.existsSync(mod.__internals._getAckPath()), false);
+    assert.equal(fs.existsSync(mod.autoBuyer.getAckPath()), false);
   });
 
   it("skips when EVOLVER_ATP_AUTOBUY is already set (any value)", async () => {
@@ -109,7 +115,7 @@ describe("cliAutobuyPrompt", () => {
     const mod = freshModule();
     fs.mkdirSync(tmpMemoryDir, { recursive: true });
     fs.writeFileSync(
-      path.join(tmpMemoryDir, mod.__internals.ACK_FILE_NAME),
+      path.join(tmpMemoryDir, mod.autoBuyer.ACK_FILENAME),
       JSON.stringify({ enabled: false, acknowledged_at: "2026-04-20", version: 1 }),
     );
     const output = collectingStream();
@@ -145,7 +151,7 @@ describe("cliAutobuyPrompt", () => {
     // env is left untouched: autoBuyer.getConsent() reads the ack file
     // directly and only falls back to env when no ack exists.
     assert.equal(env.EVOLVER_ATP_AUTOBUY, undefined);
-    const ack = JSON.parse(fs.readFileSync(mod.__internals._getAckPath(), "utf8"));
+    const ack = JSON.parse(fs.readFileSync(mod.autoBuyer.getAckPath(), "utf8"));
     assert.equal(ack.enabled, true);
     assert.equal(ack.version, 1);
     assert.match(output.read(), /\[ATP-AutoBuyer\]/);
@@ -167,7 +173,7 @@ describe("cliAutobuyPrompt", () => {
     assert.equal(res.prompted, true);
     assert.equal(res.decision, "no");
     assert.equal(env.EVOLVER_ATP_AUTOBUY, undefined);
-    const ack = JSON.parse(fs.readFileSync(mod.__internals._getAckPath(), "utf8"));
+    const ack = JSON.parse(fs.readFileSync(mod.autoBuyer.getAckPath(), "utf8"));
     assert.equal(ack.enabled, false);
   });
 
@@ -187,7 +193,7 @@ describe("cliAutobuyPrompt", () => {
     assert.equal(res.prompted, true);
     assert.equal(res.decision, "later");
     assert.equal(env.EVOLVER_ATP_AUTOBUY, undefined);
-    assert.equal(fs.existsSync(mod.__internals._getAckPath()), false);
+    assert.equal(fs.existsSync(mod.autoBuyer.getAckPath()), false);
 
     const res2 = await mod.runPrompt({
       input: makeTTY(""),
@@ -196,7 +202,7 @@ describe("cliAutobuyPrompt", () => {
       ask: async () => "",
     });
     assert.equal(res2.decision, "later");
-    assert.equal(fs.existsSync(mod.__internals._getAckPath()), false);
+    assert.equal(fs.existsSync(mod.autoBuyer.getAckPath()), false);
   });
 
   it("on ack write failure: surfaces WARN and returns reason='ack_write_failed'", async () => {
@@ -235,7 +241,7 @@ describe("cliAutobuyPrompt", () => {
     const mod = freshModule();
     fs.mkdirSync(tmpMemoryDir, { recursive: true });
     fs.writeFileSync(
-      path.join(tmpMemoryDir, mod.__internals.ACK_FILE_NAME),
+      path.join(tmpMemoryDir, mod.autoBuyer.ACK_FILENAME),
       JSON.stringify({ enabled: "yes", acknowledged_at: "x", version: 1 }),
     );
 
@@ -265,7 +271,7 @@ describe("cliAutobuyPrompt", () => {
 
     fs.mkdirSync(tmpMemoryDir, { recursive: true });
     fs.writeFileSync(
-      path.join(tmpMemoryDir, mod.__internals.ACK_FILE_NAME),
+      path.join(tmpMemoryDir, mod.autoBuyer.ACK_FILENAME),
       JSON.stringify({ enabled: false, acknowledged_at: "2026-04-20", version: 1 }),
     );
     assert.equal(

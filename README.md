@@ -184,7 +184,7 @@ Every `evolver <flag>` invocation in the rest of this README maps 1:1 to `node i
 **Evolver is a prompt generator, not a code patcher.** Each evolution cycle:
 
 1. Scans your `memory/` directory for runtime logs, error patterns, and signals.
-2. Selects the best-matching [Gene or Capsule](https://evomap.ai/wiki) from `assets/gep/`.
+2. Selects the best-matching [Gene or Capsule](https://evomap.ai/wiki) from the local GEP asset store.
 3. Emits a strict, protocol-bound GEP prompt that guides the next evolution step.
 4. Records an auditable [EvolutionEvent](https://evomap.ai/wiki) for traceability.
 
@@ -377,16 +377,17 @@ The [evomap.ai](https://evomap.ai) dashboard has a "Worker" toggle on the node d
 
 This repo includes a protocol-constrained prompt mode based on [GEP (Genome Evolution Protocol)](https://evomap.ai/wiki).
 
-- **Structured assets** live in `assets/gep/`:
-  - `assets/gep/genes.json`
-  - `assets/gep/capsules.json`
-  - `assets/gep/events.jsonl`
+- **Structured runtime assets** live in `<workspace>/.evolver/gep/` by default:
+  - `<workspace>/.evolver/gep/genes.json`
+  - `<workspace>/.evolver/gep/capsules.json`
+  - `<workspace>/.evolver/gep/events.jsonl`
+- Set `GEP_ASSETS_DIR` to place the runtime asset store elsewhere.
 - **Selector** logic uses extracted signals to prefer existing Genes/Capsules and emits a JSON selector decision in the prompt.
 - **Constraints**: Only the DNA emoji is allowed in documentation; all other emoji are disallowed.
 
 ### Your local asset store is never overwritten by upgrades
 
-`assets/gep/genes.json`, `assets/gep/capsules.json`, and `assets/gep/events.jsonl` are owned by your runtime. Starting with 1.78.3, the npm tarball no longer contains these files, so `npm i -g @evomap/evolver` (or `git pull` of the public repo) never clobbers your accumulated Genes, Capsules, or EvolutionEvents. New installs still receive the curated starter Genes through `assets/gep/genes.seed.json`, which is applied only when `genes.json` is absent.
+`<workspace>/.evolver/gep/genes.json`, `<workspace>/.evolver/gep/capsules.json`, and `<workspace>/.evolver/gep/events.jsonl` are owned by your runtime and ignored by git. `assets/gep/` is reserved for bundled starter assets. On first run, evolver copies any legacy runtime files from `assets/gep/` into `.evolver/gep/` without deleting the originals, then seeds `genes.json` from the bundled starter genes only when no local `genes.json` exists.
 
 If you ran an older evolver version that wiped your local assets, pull back everything you Promoted or published to the Hub with a single command:
 
@@ -396,7 +397,7 @@ A2A_HUB_URL=https://evomap.ai evolver sync --scope=all --export=backup.gepx
 
 This hits `/a2a/assets/purchased` (Promoted-to-you plus self-purchased) and `/a2a/assets/published-by-me` (your own drafts and published assets), re-materializes the full payloads into `genes.json` / `capsules.json`, and packs a portable `.gepx` bundle. Previously-purchased payloads re-fetch at zero cost.
 
-Purely local assets that were never uploaded to the Hub have no remote copy -- recover them from your git history (for example `git show <old_tag>:assets/gep/genes.json > restored.json`) or from disk snapshots.
+Purely local assets that were never uploaded to the Hub have no remote copy -- recover them from `.evolver/gep/`, from an older `assets/gep/` checkout, or from disk snapshots.
 
 ## Configuration & Decoupling
 

@@ -40,12 +40,29 @@ const STATE_FILE = 'self_pr_state.json';
 // fail-safe behavior (reject all files). We therefore stay silent on load
 // failure here and only surface a warning when maybeCreatePR is actually
 // invoked but the manifest cannot be read.
+//
+// Failed loads are retried after MANIFEST_RETRY_TTL_MS (default 5 min) so a
+// transient FS error during process start (build script still writing the
+// file, NFS hiccup, permission flap) does not freeze the cache at null for
+// the entire daemon lifetime, silently disabling self-PR for days or weeks
+// with no recovery. A successful load remains sticky because the manifest is
+// effectively read-only at runtime.
 let _obfuscatedFilesCache;     // undefined = not loaded; Set | null after first attempt
 let _manifestLoadError = null;
+let _manifestLoadFailedAt = 0; // ms timestamp of the last failed load attempt
 let _warnedAboutMissingManifest = false;
+let _manifestRetryTtlMs = 5 * 60 * 1000;
 
 function loadObfuscatedFromManifest() {
-  if (_obfuscatedFilesCache !== undefined) return _obfuscatedFilesCache;
+  // Hit on a successful previous load — manifest does not change at runtime.
+  if (_obfuscatedFilesCache instanceof Set) return _obfuscatedFilesCache;
+  // Within the retry window after a failure: skip the FS hit, return cached
+  // null so callers stay in the fail-safe branch without hammering the disk.
+  if (_obfuscatedFilesCache === null &&
+      (Date.now() - _manifestLoadFailedAt) < _manifestRetryTtlMs) {
+    return null;
+  }
+  // First-ever attempt OR retry window elapsed since the last failure.
   try {
     const manifestPath = path.join(getEvolverInstallRoot(), 'public.manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -60,9 +77,16 @@ function loadObfuscatedFromManifest() {
       }
     }
     _obfuscatedFilesCache = new Set(manifest.obfuscate.map((f) => f.replace(/\\/g, '/').replace(/^\.\/+/, '')));
+    _manifestLoadError = null;
+    _manifestLoadFailedAt = 0;
+    // Allow a future failure (after this success) to surface its warning
+    // once, instead of staying silent because an earlier failure already
+    // warned in this process.
+    _warnedAboutMissingManifest = false;
   } catch (e) {
     _manifestLoadError = e.message;
     _obfuscatedFilesCache = null;
+    _manifestLoadFailedAt = Date.now();
   }
   return _obfuscatedFilesCache;
 }
@@ -72,7 +96,15 @@ function loadObfuscatedFromManifest() {
 function _resetObfuscatedCache() {
   _obfuscatedFilesCache = undefined;
   _manifestLoadError = null;
+  _manifestLoadFailedAt = 0;
   _warnedAboutMissingManifest = false;
+  _manifestRetryTtlMs = 5 * 60 * 1000;
+}
+
+// Test-only: shrink (or grow) the retry TTL so a test can exercise the
+// retry-after-transient-failure path without sleeping for real time.
+function _setManifestRetryTtlForTests(ms) {
+  _manifestRetryTtlMs = Number(ms) || 0;
 }
 
 // Files that are included in the public manifest (superset patterns).
@@ -433,4 +465,5 @@ module.exports = {
   // For testing
   _loadObfuscatedFromManifest: loadObfuscatedFromManifest,
   _resetObfuscatedCache,
+  _setManifestRetryTtlForTests,
 };

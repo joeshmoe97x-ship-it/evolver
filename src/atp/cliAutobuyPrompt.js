@@ -22,22 +22,13 @@
 const readline = require("readline");
 const autoBuyer = require("./autoBuyer");
 
-// All ack file plumbing is owned by autoBuyer: filename constant, path
-// resolution, read (strict validation), and write (atomic tmp+rename).
-// cliAutobuyPrompt delegates through the public API (not __internals) so
-// the two modules cannot diverge on schema or validation — pre-
-// consolidation drift bit us twice (Bugbot PR #141: duplicate writers +
-// lenient-vs-strict reader). Using public exports keeps the "test-only"
-// contract on __internals honest (Bugbot PR #141 R6).
-const ACK_FILE_NAME = autoBuyer.ACK_FILENAME;
-
-function _getAckPath() {
-  return autoBuyer.getAckPath();
-}
-
-function _readAck() {
-  return autoBuyer.readAck();
-}
+// All ack file plumbing lives on autoBuyer (filename constant, path
+// resolution, read with strict validation, atomic write via tmp+rename).
+// cliAutobuyPrompt always reaches it through the public surface so the
+// two modules cannot diverge on schema or validation — pre-consolidation
+// drift bit us twice (Bugbot PR #141: duplicate writers + lenient-vs-
+// strict reader). No __internals re-export here either: tests import
+// autoBuyer directly so a future rename trips a single set of asserts.
 
 /**
  * @returns {"ack_present"|"env_set"|"non_tty"|"eligible"}
@@ -50,7 +41,7 @@ function classify(env, stdin) {
   if (!stdin || !stdin.isTTY) {
     return "non_tty";
   }
-  if (_readAck()) {
+  if (autoBuyer.readAck()) {
     return "ack_present";
   }
   return "eligible";
@@ -160,9 +151,4 @@ async function runPrompt(opts) {
 module.exports = {
   runPrompt,
   classify,
-  __internals: {
-    ACK_FILE_NAME,
-    _readAck,
-    _getAckPath,
-  },
 };

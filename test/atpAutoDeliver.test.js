@@ -65,6 +65,22 @@ describe('autoDeliver.start gating', () => {
     autoDeliver.start({ pollMs: 99999 });
     assert.equal(autoDeliver.isStarted(), true);
   });
+
+  it('poll interval is unref()ed so it does NOT pin the Node event loop (public issue #553)', () => {
+    // Pre-fix the setInterval handle from start() kept the event loop
+    // alive forever — `evolver run` (single-shot) wrote its artifacts
+    // and then sat as a residual `node` process because this poller
+    // never let the loop drain. Node's Timeout.hasRef() reflects whether
+    // the timer is in the refed-handle list; after .unref() it must
+    // return false.
+    autoDeliver.start({ pollMs: 20000 });
+    const handle = autoDeliver.__internals.getPollIntervalForTest();
+    assert.ok(handle, 'start() must install the poll interval');
+    assert.equal(typeof handle.hasRef, 'function',
+      'Node Timeout must expose hasRef() — required to verify unref state');
+    assert.equal(handle.hasRef(), false,
+      'poll interval must be unref()ed; otherwise `evolver run` cannot exit cleanly (issue #553)');
+  });
 });
 
 describe('autoDeliver tick behavior', () => {

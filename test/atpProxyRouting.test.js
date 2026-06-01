@@ -55,7 +55,7 @@ describe('ATP hubClient proxy routing (regression #460 Bug 2)', () => {
 
   const ENV_KEYS = [
     'EVOMAP_PROXY', 'A2A_TRANSPORT', 'A2A_HUB_URL', 'A2A_NODE_ID',
-    'A2A_NODE_SECRET', 'EVOMAP_PROXY_PORT',
+    'A2A_NODE_SECRET', 'EVOMAP_PROXY_PORT', 'EVOMAP_HUB_ALLOW_INSECURE',
   ];
 
   before(async () => {
@@ -100,6 +100,11 @@ describe('ATP hubClient proxy routing (regression #460 Bug 2)', () => {
     process.env.A2A_HUB_URL = hubUrl;
     process.env.A2A_NODE_ID = 'node_' + crypto.randomBytes(8).toString('hex');
     process.env.A2A_NODE_SECRET = crypto.randomBytes(32).toString('hex');
+    // The mock hub above is plain http://127.0.0.1:<port>. hubClient's
+    // _hubPost / _hubGet now enforce the same https-only posture as
+    // hubFetch, so we set the documented escape hatch to keep these mock
+    // servers usable.
+    process.env.EVOMAP_HUB_ALLOW_INSECURE = '1';
 
     // Bust the require cache so our env changes take effect for every test.
     for (const key of Object.keys(require.cache)) {

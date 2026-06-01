@@ -65,23 +65,47 @@ class SyncEngine {
   _scheduleOutbound(delayMs) {
     if (!this._running) return;
     this._outTimer = setTimeout(async () => {
-      if (!this._running) return;
-      this._outPending = true;
+      // Defence-in-depth: a throw from this.outbound.flush(),
+      // this.store.countPending(), or any post-flush bookkeeping used
+      // to escape the setTimeout callback. Node logs the unhandled
+      // rejection and the next setTimeout was never armed — the
+      // outbound sync loop silently died until the process restarted,
+      // while `_running` stayed true (no signal to the caller).
+      //
+      // Mirrors the heartbeat-loop fix in PR #147 (issue #544): wrap
+      // the whole tick, schedule the next iteration in `finally` so a
+      // surprise throw cannot park the loop.
+      let nextDelay = DEFAULT_OUTBOUND_INTERVAL;
       try {
-        const result = await this.outbound.flush();
-        if (result.sent > 0) this._lastActivity = Date.now();
-      } catch (err) {
-        if (err instanceof AuthError) {
-          await this._handleAuthError('outbound');
-        } else {
-          this.logger.error(`[sync] outbound error: ${err.message}`);
+        if (!this._running) return;
+        this._outPending = true;
+        try {
+          const result = await this.outbound.flush();
+          if (result.sent > 0) this._lastActivity = Date.now();
+        } catch (err) {
+          if (err instanceof AuthError) {
+            await this._handleAuthError('outbound');
+          } else {
+            this.logger.error(`[sync] outbound error: ${err.message}`);
+          }
         }
+        this._outPending = false;
+        try {
+          const pending = this.store.countPending({ direction: 'outbound' });
+          if (pending > 0) nextDelay = 1_000;
+        } catch (err) {
+          // countPending threw (corrupt store, FS hiccup): keep the
+          // default cadence rather than parking the loop.
+          this.logger.error(`[sync] countPending threw (non-fatal): ${err && err.message}`);
+        }
+      } catch (err) {
+        // Anything that escaped the inner blocks above. Log and let
+        // finally re-arm the timer.
+        this.logger.error(`[sync] outbound tick threw (non-fatal): ${err && err.message}`);
+        this._outPending = false;
+      } finally {
+        if (this._running) this._scheduleOutbound(nextDelay);
       }
-      this._outPending = false;
-      const nextDelay = this.store.countPending({ direction: 'outbound' }) > 0
-        ? 1_000
-        : DEFAULT_OUTBOUND_INTERVAL;
-      this._scheduleOutbound(nextDelay);
     }, delayMs);
     if (this._outTimer.unref) this._outTimer.unref();
   }
@@ -89,29 +113,42 @@ class SyncEngine {
   _scheduleInbound(delayMs) {
     if (!this._running) return;
     this._inTimer = setTimeout(async () => {
-      if (!this._running) return;
+      // Same defence-in-depth pattern as _scheduleOutbound: a throw
+      // from inbound.pull / ackDelivered / _isIdle used to escape the
+      // setTimeout callback and silently park the inbound loop.
+      let nextDelay = DEFAULT_POLL_INTERVAL_ACTIVE;
       try {
-        const result = await this.inbound.pull();
-        if (result.received > 0) {
-          this._lastActivity = Date.now();
-          if (typeof this.onInboundReceived === 'function') {
-            try { this.onInboundReceived(result.received); } catch (e) {
-              this.logger.warn?.('[sync] onInboundReceived callback failed:', e.message);
+        if (!this._running) return;
+        try {
+          const result = await this.inbound.pull();
+          if (result.received > 0) {
+            this._lastActivity = Date.now();
+            if (typeof this.onInboundReceived === 'function') {
+              try { this.onInboundReceived(result.received); } catch (e) {
+                this.logger.warn?.('[sync] onInboundReceived callback failed:', e.message);
+              }
             }
           }
+          await this.inbound.ackDelivered();
+        } catch (err) {
+          if (err instanceof AuthError) {
+            await this._handleAuthError('inbound');
+          } else {
+            this.logger.error(`[sync] inbound error: ${err.message}`);
+          }
         }
-        await this.inbound.ackDelivered();
+        try {
+          nextDelay = this._isIdle()
+            ? DEFAULT_POLL_INTERVAL_IDLE
+            : DEFAULT_POLL_INTERVAL_ACTIVE;
+        } catch (err) {
+          this.logger.error(`[sync] _isIdle threw (non-fatal): ${err && err.message}`);
+        }
       } catch (err) {
-        if (err instanceof AuthError) {
-          await this._handleAuthError('inbound');
-        } else {
-          this.logger.error(`[sync] inbound error: ${err.message}`);
-        }
+        this.logger.error(`[sync] inbound tick threw (non-fatal): ${err && err.message}`);
+      } finally {
+        if (this._running) this._scheduleInbound(nextDelay);
       }
-      const nextDelay = this._isIdle()
-        ? DEFAULT_POLL_INTERVAL_IDLE
-        : DEFAULT_POLL_INTERVAL_ACTIVE;
-      this._scheduleInbound(nextDelay);
     }, delayMs);
     if (this._inTimer.unref) this._inTimer.unref();
   }

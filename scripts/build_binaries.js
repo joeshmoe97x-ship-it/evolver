@@ -192,7 +192,14 @@ step('Stage 1 — bun bundle (resolve require tree to one file)');
 ensureDir(STAGE_DIR);
 const BUNDLED_JS = path.join(STAGE_DIR, 'bundled.js');
 
-run('bun', ['build', ENTRY, '--target=node', `--outfile=${BUNDLED_JS}`]);
+// `--external '@napi-rs/keyring'`: keyring is an optional dep loaded via
+// dynamic require() in workspace-id; bun otherwise tries to bundle the
+// platform-specific `.node` file as a second output asset, which makes
+// `bun build … --outfile=…` fail with "cannot write multiple output files
+// without an output directory". Treating it as external preserves the
+// existing optional-fallback behaviour (require throws → FS path used) in
+// the standalone binaries.
+run('bun', ['build', ENTRY, '--target=node', `--outfile=${BUNDLED_JS}`, '--external', '@napi-rs/keyring']);
 
 const bundleSize = OPTS.dryRun ? 0 : fs.statSync(BUNDLED_JS).size;
 console.log(`  bundled.js: ${(bundleSize / 1024 / 1024).toFixed(2)} MB`);
@@ -266,13 +273,30 @@ if (!OPTS.skipObfuscate) {
       const obfSecs = ((Date.now() - t0) / 1000).toFixed(1);
 
       const check = spawnSync('node', ['--check', OBF_JS], { encoding: 'utf8' });
-      if (check.status === 0) {
-        console.log(`  obfuscation: ${obfSecs}s, output ${(obfSize / 1024 / 1024).toFixed(2)} MB (attempt ${attempt}/${MAX_OBF_ATTEMPTS}, seed=0x${usedSeed.toString(16)})`);
-        succeeded = true;
-        break;
+      if (check.status !== 0) {
+        lastValidationErr = (check.stderr || check.stdout || '').split('\n').slice(0, 3).join(' | ');
+        console.warn(`  attempt ${attempt}/${MAX_OBF_ATTEMPTS}: obfuscator output failed node --check (${lastValidationErr.slice(0, 200)}); retrying with perturbed seed...`);
+        continue;
       }
-      lastValidationErr = (check.stderr || check.stdout || '').split('\n').slice(0, 3).join(' | ');
-      console.warn(`  attempt ${attempt}/${MAX_OBF_ATTEMPTS}: obfuscator output failed node --check (${lastValidationErr.slice(0, 200)}); retrying with perturbed seed...`);
+      // Second gate: bun's compile-time parser is stricter than node's.
+      // 1.87.x (post `@napi-rs/keyring` dep) revealed that ~5% of obfuscator
+      // outputs that pass `node --check` still trip bun with errors like
+      // `Expected "in" but found ","`. Probe with a cheap bundle-only call
+      // (no --compile, native target) to fail fast and feed back into the
+      // seed-perturbation loop instead of dying in stage 3.
+      const bunProbe = spawnSync('bun', [
+        'build', OBF_JS,
+        '--target=bun',
+        `--outfile=${path.join(STAGE_DIR, 'bundled.obf.bunprobe.js')}`,
+      ], { encoding: 'utf8' });
+      if (bunProbe.status !== 0) {
+        lastValidationErr = (bunProbe.stderr || bunProbe.stdout || '').split('\n').slice(0, 3).join(' | ');
+        console.warn(`  attempt ${attempt}/${MAX_OBF_ATTEMPTS}: obfuscator output rejected by bun parser (${lastValidationErr.slice(0, 200)}); retrying with perturbed seed...`);
+        continue;
+      }
+      console.log(`  obfuscation: ${obfSecs}s, output ${(obfSize / 1024 / 1024).toFixed(2)} MB (attempt ${attempt}/${MAX_OBF_ATTEMPTS}, seed=0x${usedSeed.toString(16)})`);
+      succeeded = true;
+      break;
     }
     if (!succeeded) {
       console.error(`  ERROR: javascript-obfuscator produced syntactically invalid output in ${MAX_OBF_ATTEMPTS} attempts.`);

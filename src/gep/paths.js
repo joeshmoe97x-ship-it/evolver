@@ -172,13 +172,16 @@ function getEvolutionDir() {
 }
 
 function getGepAssetsDir() {
-  const repoRoot = getRepoRoot();
-  const baseDir = process.env.GEP_ASSETS_DIR || path.join(repoRoot, 'assets', 'gep');
+  const baseDir = process.env.GEP_ASSETS_DIR || path.join(getWorkspaceRoot(), '.evolver', 'gep');
   const scope = getSessionScope();
   if (scope) {
     return path.join(baseDir, 'scopes', scope);
   }
   return baseDir;
+}
+
+function getBundledGepAssetsDir() {
+  return path.join(getEvolverInstallRoot(), 'assets', 'gep');
 }
 
 function getSkillsDir() {
@@ -471,6 +474,7 @@ module.exports = {
   getMemoryDir,
   getEvolutionDir,
   getGepAssetsDir,
+  getBundledGepAssetsDir,
   getSkillsDir,
   getSessionScope,
   getAgentSessionsDir,

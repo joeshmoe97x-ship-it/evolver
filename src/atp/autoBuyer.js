@@ -36,7 +36,13 @@ const DEFAULT_DAILY_CAP = 50;
 const DEFAULT_PER_ORDER_CAP = 10;
 const DEFAULT_ORDER_TIMEOUT_MS = 3000;
 const COLD_START_WINDOW_MS = 5 * 60 * 1000;
+// Successful orders dedup for 24h so the same capability gap is only paid for
+// once per day. Failed orders dedup for 5 minutes only — long enough to
+// absorb tight retry loops (the original goal of "don't hammer the hub")
+// without making the user wait 24h to retry a question after a transient
+// 503/network blip.
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+const DEDUP_FAILURE_TTL_MS = 5 * 60 * 1000;
 const LEDGER_FILENAME = 'atp-autobuyer-ledger.json';
 const ACK_FILENAME = 'atp-autobuy-ack.json';
 
@@ -145,13 +151,22 @@ function _rotateIfNewDay(ledger, now) {
 }
 
 function _pruneDedup(ledger, now) {
-  const cutoff = (typeof now === 'number' ? now : Date.now()) - DEDUP_TTL_MS;
+  const nowMs = typeof now === 'number' ? now : Date.now();
   const out = {};
   const src = ledger.dedup || {};
   const keys = Object.keys(src);
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
-    if (typeof src[k] === 'number' && src[k] >= cutoff) out[k] = src[k];
+    const entry = src[k];
+    // Legacy ledgers written by older versions stored plain timestamps; treat
+    // them as successful orders (the original behaviour) so an upgrade does
+    // not suddenly forget recent dedups.
+    if (typeof entry === 'number') {
+      if (entry >= nowMs - DEDUP_TTL_MS) out[k] = entry;
+    } else if (entry && typeof entry.ts === 'number') {
+      const ttl = entry.failed ? DEDUP_FAILURE_TTL_MS : DEDUP_TTL_MS;
+      if (entry.ts >= nowMs - ttl) out[k] = entry;
+    }
   }
   ledger.dedup = out;
   return ledger;
@@ -205,11 +220,36 @@ function _withTimeout(promise, timeoutMs) {
   ]);
 }
 
-async function considerOrder(opts) {
-  if (!_started) return { ok: false, skipped: true, reason: 'not_started' };
+// Single-flight queue: serialize the read → cap-check → placeOrder → write
+// pipeline so two concurrent considerOrder() calls cannot both pass the cap
+// check on the same ledger snapshot and silently double-spend.
+//
+// Without this, two parallel calls (e.g. user runs Claude Code in two tabs
+// through the same proxy, or two capability gaps fire in the same tick) both
+// read spent=40, both compute remaining=10, both await placeOrder, both
+// increment to spent=50, and write — silently exceeding the daily cap by one
+// full order each. autoBuyer is single-process so an in-memory queue is
+// sufficient; a file lock would only be needed if multiple OS processes
+// shared the same ledger file (not the current deployment model).
+let _orderQueue = Promise.resolve();
+
+function considerOrder(opts) {
+  if (!_started) return Promise.resolve({ ok: false, skipped: true, reason: 'not_started' });
   if (!opts || !Array.isArray(opts.capabilities) || opts.capabilities.length === 0) {
-    return { ok: false, skipped: true, reason: 'no_capabilities' };
+    return Promise.resolve({ ok: false, skipped: true, reason: 'no_capabilities' });
   }
+  const next = _orderQueue.then(
+    () => _considerOrderSerialized(opts),
+    () => _considerOrderSerialized(opts), // never let a prior rejection break the chain
+  );
+  // Swallow rejection on the queue tail so a single thrown error here does
+  // not poison every subsequent call; the original `next` promise still
+  // surfaces the error to the caller.
+  _orderQueue = next.then(() => {}, () => {});
+  return next;
+}
+
+async function _considerOrderSerialized(opts) {
   const now = Date.now();
   let ledger = _readLedger();
   ledger = _rotateIfNewDay(ledger, now);
@@ -248,15 +288,17 @@ async function considerOrder(opts) {
 
   if (result && result.ok) {
     ledger.spent = (ledger.spent || 0) + budget;
-    ledger.dedup[hash] = now;
+    ledger.dedup[hash] = { ts: now, failed: false };
     _writeLedger(ledger);
     console.log('[ATP-AutoBuyer] Order placed: ' + (result.data && result.data.order_id) + ' budget=' + budget + ' remaining_today=' + Math.max(0, dailyCap - ledger.spent));
     return { ok: true, data: result.data, spent: budget };
   }
 
-  // On failure still record dedup so we don't hammer the hub for the same
-  // capability gap within the TTL window (but do NOT charge the spend).
-  ledger.dedup[hash] = now;
+  // On failure record a SHORT-TTL dedup entry (5 min) so we don't hammer the
+  // hub for the same capability gap inside a tight retry loop, but the user
+  // can retry the same question once the transient error clears — far better
+  // than the previous 24h block for a single 503.
+  ledger.dedup[hash] = { ts: now, failed: true };
   _writeLedger(ledger);
   return { ok: false, error: (result && result.error) || 'unknown_error' };
 }
@@ -267,15 +309,25 @@ async function considerOrder(opts) {
 // via .tmp + rename so a crash mid-write never produces a corrupt ack file.
 function setConsent(enabled) {
   const dir = getMemoryDir();
-  try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
   const body = {
     enabled: !!enabled,
     acknowledged_at: new Date().toISOString(),
     version: 1,
   };
   const tmp = _ackPath() + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmp, _ackPath());
+  // Single try/catch over the whole pipeline. Previously the mkdirSync was
+  // wrapped in its own swallowing try/catch, so an EACCES on the parent dir
+  // would surface to the caller as a confusing ENOENT from writeFileSync.
+  // Surface the original error verbatim and best-effort clean up any
+  // partial .tmp file so a retry from a TTY prompt sees a clean slate.
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, _ackPath());
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    throw err;
+  }
   return body;
 }
 
@@ -288,6 +340,7 @@ function _resetForTests() {
     perOrderCap: DEFAULT_PER_ORDER_CAP,
     timeoutMs: DEFAULT_ORDER_TIMEOUT_MS,
   };
+  _orderQueue = Promise.resolve();
 }
 
 module.exports = {
@@ -306,22 +359,24 @@ module.exports = {
   readAck: _readAck,
   ACK_FILENAME,
   // Exposed for tests and diagnostics only; callers should not depend on
-  // these internals in production code paths.
+  // these internals in production code paths. Ack-file helpers
+  // (getAckPath / readAck / ACK_FILENAME) are intentionally NOT mirrored
+  // here — production and tests both go through the public surface above,
+  // so a single source of truth survives schema changes (Bugbot PR #141 R6
+  // follow-up: keep "test-only" honest, no production caller may reach in).
   __internals: {
     readLedger: _readLedger,
     writeLedger: _writeLedger,
     questionHash: _questionHash,
     effectiveCap: _effectiveCap,
     resetForTests: _resetForTests,
-    ackPath: _ackPath,
-    readAck: _readAck,
     constants: {
       DEFAULT_DAILY_CAP,
       DEFAULT_PER_ORDER_CAP,
       COLD_START_WINDOW_MS,
       DEDUP_TTL_MS,
+      DEDUP_FAILURE_TTL_MS,
       LEDGER_FILENAME,
-      ACK_FILENAME,
     },
   },
 };

@@ -16,6 +16,7 @@
 
 const http = require('http');
 const { getHubUrl, buildHubHeaders, getNodeId } = require('../gep/a2aProtocol');
+const { hubFetch } = require('../gep/hubFetch');
 const { getProxyUrl, getProxyToken } = require('../proxy/server/settings');
 
 function _isProxyMode() {
@@ -68,12 +69,33 @@ function _proxyRequest(method, path, body, timeoutMs) {
   });
 }
 
+// Route through hubFetch() rather than the global `fetch()` for two
+// reasons (both flagged by Cursor reviewers on PR #160):
+//
+//   1. Dispatcher mixing (Bugbot HIGH): `strictUndiciAgent` is an Agent
+//      from the *installed* `undici` package, but `global.fetch` is
+//      backed by Node's *internal* undici. Passing one to the other
+//      throws `UND_ERR_INVALID_ARG: invalid onRequestStart method` at
+//      request time — exactly the failure mode the comment at the top
+//      of hubFetch.js calls out. hubFetch already routes through
+//      `undici.fetch` from the same package as its Agent, so all calls
+//      that go through hubFetch are immune.
+//
+//   2. Case-sensitive scheme check (Security Reviewer MEDIUM): a hand-
+//      rolled `endpoint.startsWith('https:')` would skip the strict
+//      dispatcher for `HTTPS://...`. hubFetch's `_validateHubUrl` uses
+//      `new URL(url).protocol`, which normalises to lowercase, so
+//      routing through it eliminates the bug class.
+//
+// Routing through hubFetch also inherits the URL-scheme enforcement and
+// the EVOMAP_HUB_ALLOW_INSECURE escape hatch automatically; we no
+// longer need the explicit `enforceHubScheme` guard here.
 function _hubPost(pathSuffix, body, timeoutMs) {
   const hubUrl = getHubUrl();
   if (!hubUrl) return Promise.resolve({ ok: false, error: 'no_hub_url' });
   const endpoint = hubUrl.replace(/\/+$/, '') + pathSuffix;
   const timeout = timeoutMs || require('../config').HTTP_TRANSPORT_TIMEOUT_MS;
-  return fetch(endpoint, {
+  return hubFetch(endpoint, {
     method: 'POST',
     headers: buildHubHeaders(),
     body: JSON.stringify(body),
@@ -83,7 +105,17 @@ function _hubPost(pathSuffix, body, timeoutMs) {
       if (!res.ok) return res.text().then(function (t) { return { ok: false, status: res.status, error: t.slice(0, 400) }; });
       return res.json().then(function (data) { return { ok: true, data: data }; });
     })
-    .catch(function (err) { return { ok: false, error: err.message }; });
+    .catch(function (err) {
+      // hubFetch throws synchronously (rejected Promise) when the URL
+      // fails scheme validation in secure mode. Translate to the same
+      // structured envelope the previous in-line guard produced so the
+      // caller contract is unchanged.
+      const msg = (err && err.message) || String(err);
+      if (msg.indexOf('[hubFetch]') !== -1) {
+        return { ok: false, error: 'tls_refused: ' + msg };
+      }
+      return { ok: false, error: msg };
+    });
 }
 
 function _hubGet(pathSuffix, timeoutMs) {
@@ -91,7 +123,7 @@ function _hubGet(pathSuffix, timeoutMs) {
   if (!hubUrl) return Promise.resolve({ ok: false, error: 'no_hub_url' });
   const endpoint = hubUrl.replace(/\/+$/, '') + pathSuffix;
   const timeout = timeoutMs || require('../config').HTTP_TRANSPORT_TIMEOUT_MS;
-  return fetch(endpoint, {
+  return hubFetch(endpoint, {
     method: 'GET',
     headers: buildHubHeaders(),
     signal: AbortSignal.timeout(timeout),
@@ -100,7 +132,13 @@ function _hubGet(pathSuffix, timeoutMs) {
       if (!res.ok) return res.text().then(function (t) { return { ok: false, status: res.status, error: t.slice(0, 400) }; });
       return res.json().then(function (data) { return { ok: true, data: data }; });
     })
-    .catch(function (err) { return { ok: false, error: err.message }; });
+    .catch(function (err) {
+      const msg = (err && err.message) || String(err);
+      if (msg.indexOf('[hubFetch]') !== -1) {
+        return { ok: false, error: 'tls_refused: ' + msg };
+      }
+      return { ok: false, error: msg };
+    });
 }
 
 // Dispatcher: choose proxy or direct hub based on env + proxy availability.

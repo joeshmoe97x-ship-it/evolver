@@ -310,9 +310,11 @@ describe('getEvolutionDir', () => {
 
 describe('getGepAssetsDir', () => {
   let saved = {};
-  const envKeys = ['GEP_ASSETS_DIR', 'EVOLVER_SESSION_SCOPE', 'EVOLVER_REPO_ROOT'];
+  let tmpDir;
+  const envKeys = ['GEP_ASSETS_DIR', 'EVOLVER_SESSION_SCOPE', 'EVOLVER_REPO_ROOT', 'OPENCLAW_WORKSPACE'];
 
   beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gep-assets-dir-test-'));
     for (const k of envKeys) { saved[k] = process.env[k]; delete process.env[k]; }
   });
 
@@ -321,12 +323,19 @@ describe('getGepAssetsDir', () => {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it('returns GEP_ASSETS_DIR when set', () => {
     process.env.GEP_ASSETS_DIR = '/custom/assets';
     const { getGepAssetsDir } = freshRequire('../src/gep/paths');
     assert.equal(getGepAssetsDir(), '/custom/assets');
+  });
+
+  it('defaults runtime assets to the workspace .evolver/gep directory', () => {
+    process.env.OPENCLAW_WORKSPACE = tmpDir;
+    const { getGepAssetsDir } = freshRequire('../src/gep/paths');
+    assert.equal(getGepAssetsDir(), path.join(tmpDir, '.evolver', 'gep'));
   });
 
   it('appends scope subdirectory when session scope is set', () => {

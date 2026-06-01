@@ -2,6 +2,7 @@ node_modules/
 .env
 memory/
 workspace/
+.evolver/
 assets/gep/candidates.jsonl
 assets/gep/external_candidates.jsonl
 assets/gep/failed_capsules.json

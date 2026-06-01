@@ -50,9 +50,56 @@ const REDACT_PATTERNS = [
   /[A-Z]:\\[^\s"',;)}\]]+/g,
   // Email addresses
   /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
-  // .env file references
-  /\.env(?:\.[a-zA-Z]+)?/g,
+  // .env file references — only when the dot-env token looks like a real
+  // path (preceded by a path separator) or carries a suffix like
+  // `.env.production`. Bare prose mentions such as "Read from `.env` file"
+  // are intentionally NOT matched: the filename itself is a convention, not
+  // a secret, and over-redacting it strips useful debugging context from
+  // capsules without protecting anything the other patterns above don't
+  // already cover (API keys / tokens inside the env file).
+  /\.env\.[a-zA-Z]+\b/g,
+  /(?<=[\\/])\.env\b/g,
 ];
+
+// Post-filter allowlist: matches that the regexes above will catch but that
+// are not actually sensitive. Each entry is tested against the captured
+// match — if any allowlist entry matches, the match is kept as-is instead of
+// being replaced with [REDACTED]. Keeping this as a post-filter rather than
+// bolting more lookaheads into the patterns keeps the redaction regexes
+// readable and the allowlist easy to audit.
+const REDACT_ALLOWLIST = [
+  // --- CI runner paths --- (well-known, no user PII)
+  /^\/home\/runner(?:[/]|$)/,             // GitHub Actions Linux
+  /^\/Users\/runner(?:[/]|$)/,            // GitHub Actions macOS
+  /^\/home\/circleci(?:[/]|$)/,           // CircleCI Linux
+  /^\/Users\/distiller(?:[/]|$)/,         // CircleCI macOS
+  /^\/home\/vsts(?:[/]|$)/,               // Azure Pipelines
+  /^\/home\/travis(?:[/]|$)/,             // Travis CI
+  /^\/home\/jenkins(?:[/]|$)/,            // Jenkins default
+  // --- Bot / no-reply email addresses --- (not personal addresses)
+  // Domain MUST be anchored to a well-known public code host. An open
+  // `noreply@<anything>` allowlist would leak internal corp infra domains
+  // like `noreply@internal-codename.corp` (Bugbot PR #151 Low).
+  /^(?:noreply|no-reply|donotreply|do-not-reply)@(?:github\.com|users\.noreply\.github\.com|gitlab\.com|bitbucket\.org|npmjs\.com|claude\.ai|anthropic\.com)$/i,
+  /^[0-9]+\+[a-zA-Z0-9._-]+@users\.noreply\.github\.com$/i, // GitHub commit-author noreply (full form)
+  // The ssh_target leak scanner uses `[a-zA-Z0-9_.-]+` (no `+`) for the
+  // email local part, so `8275028+user@users.noreply.github.com` is
+  // captured as just `user@users.noreply.github.com` — the full-form
+  // anchor above can't match. Allowlist any local part on this domain
+  // since the domain itself is by design non-personal (Bugbot PR #151
+  // round 2 Medium).
+  /^[a-zA-Z0-9_.-]+@users\.noreply\.github\.com$/i,
+  /^git@github\.com$/i,                   // SSH alias, not a real mailbox
+  /^git@gitlab\.com$/i,
+  /^git@bitbucket\.org$/i,
+];
+
+function _isAllowlisted(match) {
+  for (let i = 0; i < REDACT_ALLOWLIST.length; i++) {
+    if (REDACT_ALLOWLIST[i].test(match)) return true;
+  }
+  return false;
+}
 
 const REDACTED = '[REDACTED]';
 
@@ -62,7 +109,7 @@ function redactString(str) {
   for (const pattern of REDACT_PATTERNS) {
     // Reset lastIndex for global regexes
     pattern.lastIndex = 0;
-    result = result.replace(pattern, REDACTED);
+    result = result.replace(pattern, (match) => (_isAllowlisted(match) ? match : REDACTED));
   }
   return result;
 }
@@ -139,6 +186,13 @@ function scanForLeaks(content) {
     let match;
     while ((match = scanner.pattern.exec(content)) !== null) {
       const val = match[0];
+      // Apply the same allowlist the redactor uses, otherwise selfPR's
+      // fullLeakCheck would block a self-PR over /home/runner/ paths or
+      // noreply@github.com — exactly the false positives the allowlist
+      // was introduced to fix (Bugbot PR #151 Medium: contradiction
+      // between redactString saying "safe" and scanForLeaks saying
+      // "leak").
+      if (_isAllowlisted(val)) continue;
       const key = scanner.type + ':' + val;
       if (seen.has(key)) continue;
       seen.add(key);

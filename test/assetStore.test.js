@@ -200,14 +200,11 @@ describe('loadGenes', () => {
   // `genes.seed.json`, and `ensureGenesSeeded()` copies it into the user's
   // store on first run. The fallback only fires when neither file exists.
   it('seed genes.json populates routing_hint reachable via prod ensureGenesSeeded path', () => {
-    const { genesPath, genesSeedPath, loadGenes } = freshRequire();
-    // Stage the real shipped seed (repo-root assets/gep/genes.json) as
-    // `genes.seed.json` in the test's GEP_ASSETS_DIR, mirroring what
-    // build_public.js does when packing the npm tarball. This forces the
-    // production code path: ensureGenesSeeded copies seed -> genes.json,
-    // and loadGenes reads from that, NOT from getDefaultGenes().
-    const repoSeed = path.join(__dirname, '..', 'assets', 'gep', 'genes.json');
-    fs.copyFileSync(repoSeed, genesSeedPath());
+    const { genesPath, loadGenes } = freshRequire();
+    // The production path now keeps user-mutable assets in GEP_ASSETS_DIR
+    // while reading starter genes from the bundled assets/gep seed. This
+    // forces ensureGenesSeeded() to copy from the package seed into the
+    // runtime store, NOT from getDefaultGenes().
     assert.ok(!fs.existsSync(genesPath()), 'precondition: no user genes.json yet');
 
     const genes = loadGenes();
@@ -226,6 +223,50 @@ describe('loadGenes', () => {
     assert.deepEqual(optimize.routing_hint, { tier: 'mid', reasoning_level: 'medium' });
 
     assert.ok(fs.existsSync(genesPath()), 'ensureGenesSeeded must have copied seed -> genes.json');
+  });
+
+  it('copies legacy runtime assets from assets/gep into default .evolver/gep store once', () => {
+    teardownTempEnv();
+    setupTempEnv();
+    delete process.env.GEP_ASSETS_DIR;
+
+    const legacyDir = path.join(tmpDir, 'assets', 'gep');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    const legacyGenes = { version: 1, genes: [{ type: 'Gene', id: 'legacy_gene' }] };
+    fs.writeFileSync(path.join(legacyDir, 'genes.json'), JSON.stringify(legacyGenes), 'utf8');
+    fs.writeFileSync(path.join(legacyDir, 'events.jsonl'), JSON.stringify({ id: 'evt_1' }) + '\n', 'utf8');
+
+    const { genesPath, eventsPath, ensureAssetFiles } = freshRequire();
+    assert.equal(genesPath(), path.join(tmpDir, '.evolver', 'gep', 'genes.json'));
+
+    ensureAssetFiles();
+
+    assert.deepEqual(JSON.parse(fs.readFileSync(genesPath(), 'utf8')), legacyGenes);
+    assert.equal(fs.readFileSync(eventsPath(), 'utf8'), JSON.stringify({ id: 'evt_1' }) + '\n');
+    assert.ok(fs.existsSync(path.join(legacyDir, 'genes.json')), 'legacy source is copied, not deleted');
+  });
+
+  it('copies scoped legacy runtime assets into scoped default .evolver/gep store', () => {
+    teardownTempEnv();
+    setupTempEnv();
+    delete process.env.GEP_ASSETS_DIR;
+    process.env.EVOLVER_SESSION_SCOPE = 'scope-a';
+
+    const unscopedLegacyDir = path.join(tmpDir, 'assets', 'gep');
+    const scopedLegacyDir = path.join(unscopedLegacyDir, 'scopes', 'scope-a');
+    fs.mkdirSync(scopedLegacyDir, { recursive: true });
+    const unscopedGenes = { version: 1, genes: [{ type: 'Gene', id: 'unscoped_gene' }] };
+    const scopedGenes = { version: 1, genes: [{ type: 'Gene', id: 'scoped_gene' }] };
+    fs.writeFileSync(path.join(unscopedLegacyDir, 'genes.json'), JSON.stringify(unscopedGenes), 'utf8');
+    fs.writeFileSync(path.join(scopedLegacyDir, 'genes.json'), JSON.stringify(scopedGenes), 'utf8');
+
+    const { genesPath, ensureAssetFiles } = freshRequire();
+    assert.equal(genesPath(), path.join(tmpDir, '.evolver', 'gep', 'scopes', 'scope-a', 'genes.json'));
+
+    ensureAssetFiles();
+
+    assert.deepEqual(JSON.parse(fs.readFileSync(genesPath(), 'utf8')), scopedGenes);
+    assert.ok(fs.existsSync(path.join(scopedLegacyDir, 'genes.json')), 'scoped legacy source is copied, not deleted');
   });
 });
 

@@ -108,6 +108,31 @@ function buildMessagesHandler({ anthropicProxy, logger, routerEnabled } = {}) {
     ? routerEnabled
     : process.env.EVOMAP_ROUTER_ENABLED === '1';
 
+  // Degenerate-tier guard (#152). The shipped DEFAULT_TIER_MODELS pins all
+  // three tiers to the same model on purpose: operators tuning tier mapping
+  // run tier-uniform so the no-downgrade guard never engages and 5xx retries
+  // always replay the same model (PR #135). Per-tier `EVOMAP_MODEL_*` env
+  // overrides are how a real deployment opts into cost-saving. The trap is the
+  // user who flips `EVOMAP_ROUTER_ENABLED=1` expecting savings (per README)
+  // but leaves the overrides unset: every tier resolves to one model, so
+  // routing is a silent no-op and — for anyone previously on a cheaper model —
+  // a cost *increase*. Emit one loud boot WARN so the degenerate config is
+  // visible in logs instead of manifesting as a surprise bill. Resolved at
+  // construction (proxy start) to match how `enabled` is read.
+  if (enabled) {
+    const tiers = resolveTierModels();
+    const distinct = new Set([tiers.cheap, tiers.mid, tiers.expensive]);
+    if (distinct.size === 1) {
+      log.warn?.(JSON.stringify({
+        event: 'router_degenerate_tiers',
+        message: 'router enabled but all tiers map to the same model — no '
+          + 'cost-saving effect. Set EVOMAP_MODEL_CHEAP / EVOMAP_MODEL_MID / '
+          + 'EVOMAP_MODEL_EXPENSIVE to enable tier-based routing.',
+        model: tiers.cheap,
+      }));
+    }
+  }
+
   return async ({ body, headers }) => {
     const inboundHeaders = headers || {};
     // x-api-key is satisfied by either the inbound header OR a proxy-side

@@ -31,6 +31,16 @@ const envFingerprint = require('./envFingerprint');
 const a2a = require('./a2aProtocol');
 
 const SKILL2GEP_ID_PREFIX = 'gene_s2g_';
+
+// Max strategy steps kept on a distilled Gene. The old value (10) silently
+// truncated multi-section Skills, dropping the *governance* tail
+// (candidate-gating, Human Gate, Output Contract, rollback) that lives at the
+// end of a well-formed SKILL.md. extractSteps emits each list item flatly, so
+// a rich Skill (workflow + governance sections) yields ~25-27 short one-line
+// steps; the cap must clear that to keep the tail. 28 covers a well-formed
+// SKILL.md while staying compact (short one-liners, far below a full Skill's
+// token weight). Genuinely longer Skills are still bounded here.
+const MAX_STRATEGY_STEPS = 28;
 const CAPSULE_ID_PREFIX = 'cap_s2g_';
 const LOG_FILE = 'skill2gep_log.jsonl';
 const STATE_FILE = 'skill2gep_state.json';
@@ -131,6 +141,7 @@ function parseSkillMd(skillMd) {
   });
   Object.keys(sections).forEach((k) => { sections[k] = sections[k].join('\n').trim(); });
 
+  // Return the FIRST matching section (kept for signals, which wants one block).
   function pickSection(keywords) {
     for (const kw of keywords) {
       for (const k of Object.keys(sections)) {
@@ -140,9 +151,60 @@ function parseSkillMd(skillMd) {
     return '';
   }
 
+  // Return ALL matching sections concatenated, in document order. A SKILL.md
+  // often spreads positive steps across several headed sections ("Quick
+  // Workflow", "Human Gate Defaults", "Output Contract"); picking only the
+  // first dropped the governance tail. Each section's title is preserved as a
+  // step-context line so a trailing "## Human Gate" still contributes its
+  // bullets. De-duplicated by section key.
+  function pickSectionsAll(keywords) {
+    const seen = new Set();
+    const out = [];
+    for (const k of Object.keys(sections)) {
+      if (keywords.some((kw) => k.indexOf(kw) !== -1) && !seen.has(k)) {
+        seen.add(k);
+        out.push(sections[k]);
+      }
+    }
+    return out.join('\n');
+  }
+
+  // Extract ordered steps from a markdown block: every list item becomes its
+  // own step, in document order. This is the pre-PR flat behaviour, kept
+  // deliberately simple — an earlier version folded indented sub-bullets into
+  // their parent step to look tidier, but that indentation logic grew a long
+  // tail of edge cases (section-trim interaction, length-filtered parents,
+  // cross-section indentation). Folding was only cosmetic; flat extraction
+  // preserves the same governance tail with no indentation reasoning at all.
+  // opts.minLen / opts.maxLen bound each item (defaults 5..300, matching the
+  // original strategy/avoid gate). Preconditions pass {minLen: 1,
+  // maxLen: Infinity} so short prerequisites like "Git"/"npm" survive.
+  function extractSteps(block, opts) {
+    const minLen = opts && typeof opts.minLen === 'number' ? opts.minLen : 5;
+    const maxLen = opts && typeof opts.maxLen === 'number' ? opts.maxLen : 300;
+    const steps = [];
+    for (const line of String(block || '').split(/\n/)) {
+      const m = line.match(/^\s*(?:\d+\.|[-*])\s+(.+?)\s*$/);
+      if (!m) continue;
+      const txt = m[1].trim();
+      if (txt.length >= minLen && txt.length <= maxLen) steps.push(txt);
+    }
+    return steps;
+  }
+
   const signals = [];
+  // Section keywords are matched against lower-cased headings. A SKILL.md may
+  // be authored in Chinese (e.g. game-* skills use "## 何时使用" / "## 触发条件"),
+  // whose heading key never contains an English token, so the CJK synonyms
+  // below are required for those skills to contribute signals/strategy/avoid
+  // at all — without them the distiller silently falls back to a thin gene.
+  // NOTE: this only fixes *section matching*. The signal tokenizer below still
+  // keeps ASCII [a-z0-9_] only, so signals for a Chinese skill come from its
+  // (English) frontmatter description, not from CJK body words. CJK signal
+  // tokenization needs a word segmenter and is intentionally out of scope here.
   const signalSource = (frontmatter.description || '') + '\n' + pickSection([
     'trigger', 'when to use', 'when', 'use when', 'scenario',
+    '何时使用', '什么时候使用', '触发条件', '触发', '使用场景', '核心目标', '适用',
   ]);
   signalSource.split(/[`,.\n]/).forEach((tok) => {
     const s = tok.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '');
@@ -151,28 +213,27 @@ function parseSkillMd(skillMd) {
     }
   });
 
-  const strategy = [];
-  const strategyBlock = pickSection(['workflow', 'strategy', 'steps', 'procedure', 'quick start', 'how to']);
-  strategyBlock.split(/\n/).forEach((line) => {
-    const step = line.match(/^\s*(?:\d+\.|[-*])\s+(.+?)\s*$/);
-    if (step) {
-      const s = step[1].trim();
-      if (s.length >= 5 && s.length <= 300) strategy.push(s);
-    }
-  });
+  // Strategy spans the workflow AND the governance tail (Human Gate, Output
+  // Contract) — concatenate all matching sections so the candidate/gate/rollback
+  // discipline survives, and fold nested sub-bullets into their parent step.
+  const strategyBlock = pickSectionsAll([
+    'workflow', 'strategy', 'steps', 'procedure', 'quick start', 'how to',
+    'human gate', 'output contract', 'release', 'rollback', 'promotion',
+    // CJK synonyms: positive workflow + governance-tail headings.
+    '工作流', '流程', '步骤', '核心方法', '方法', '快速规则', '规则',
+    '输出门', '输出门槛', '人工确认', '人工门', '回滚', '发布', '晋级',
+  ]);
+  const strategy = extractSteps(strategyBlock);
 
-  const avoid = [];
-  const avoidBlock = pickSection(['avoid', 'pitfall', 'anti-pattern', 'common mistake', 'do not', 'forbidden']);
-  avoidBlock.split(/\n/).forEach((line) => {
-    const step = line.match(/^\s*(?:\d+\.|[-*])\s+(.+?)\s*$/);
-    if (step) {
-      const s = step[1].trim();
-      if (s.length >= 5 && s.length <= 300) avoid.push(s);
-    }
-  });
+  const avoidBlock = pickSectionsAll([
+    'avoid', 'pitfall', 'anti-pattern', 'common mistake', 'do not', 'forbidden', "don't",
+    // CJK synonyms: anti-pattern / "do not" headings.
+    '不要做', '不要', '常见错误', '避免', '陷阱', '禁止',
+  ]);
+  const avoid = extractSteps(avoidBlock);
 
   const validation = [];
-  const valBlock = pickSection(['validation', 'test', 'verify', 'check']);
+  const valBlock = pickSection(['validation', 'test', 'verify', 'check', '校验', '验证', '测试', '检查']);
   const fenceRe = /```(?:bash|sh|shell)?\s*\n([\s\S]*?)\n```/g;
   let fm;
   while ((fm = fenceRe.exec(valBlock)) !== null) {
@@ -182,12 +243,10 @@ function parseSkillMd(skillMd) {
     });
   }
 
-  const preconditions = [];
-  const preBlock = pickSection(['precondition', 'requirement', 'prerequisite']);
-  preBlock.split(/\n/).forEach((line) => {
-    const step = line.match(/^\s*(?:\d+\.|[-*])\s+(.+?)\s*$/);
-    if (step) preconditions.push(step[1].trim());
-  });
+  // Preconditions keep the pre-PR behaviour: no length gate, no folding, so
+  // short items like "Git"/"npm" survive and preconditions_extracted is stable.
+  const preBlock = pickSection(['precondition', 'requirement', 'prerequisite', '前置条件', '前置', '先决条件', '要求']);
+  const preconditions = extractSteps(preBlock, { minLen: 1, maxLen: Infinity });
 
   return {
     frontmatter: frontmatter,
@@ -195,7 +254,7 @@ function parseSkillMd(skillMd) {
     name: frontmatter.name || (sections['_preamble'] || '').split(/\n/)[0].replace(/^#+\s*/, '').trim(),
     description: frontmatter.description || '',
     signals_match: signals.slice(0, 8),
-    strategy: strategy.slice(0, 10),
+    strategy: strategy.slice(0, MAX_STRATEGY_STEPS),
     avoid: avoid.slice(0, 5),
     validation: validation.slice(0, 5),
     preconditions: preconditions.slice(0, 4),
@@ -280,7 +339,7 @@ function synthesizeGene(parsed, execution, opts) {
     preconditions: (parsed.preconditions && parsed.preconditions.length > 0)
       ? parsed.preconditions
       : ['Skill ' + (parsed.name || 'unknown') + ' has just been executed locally'],
-    strategy: strategy.slice(0, 10),
+    strategy: strategy.slice(0, MAX_STRATEGY_STEPS),
     avoid: avoid,
     constraints: {
       max_files: (opts && opts.maxFiles) || skillDistiller.DISTILLED_MAX_FILES,
@@ -309,8 +368,27 @@ function synthesizeGene(parsed, execution, opts) {
 
 function inferCategory(signals, description) {
   const hay = ((description || '') + ' ' + (signals || []).join(' ')).toLowerCase();
-  if (/error|fail|repair|rollback|bug|fix|guard/.test(hay)) return 'repair';
-  if (/feature|add|implement|new capability|innovate/.test(hay)) return 'innovate';
+  // Priority repair -> innovate -> optimize, mirroring the sibling
+  // inferCategoryFromSignals() in skillDistiller.js / solidify.js.
+  //
+  // REPAIR set uses SUBSTRING matching (no \b): it must catch both inflected
+  // forms ("errors", "fixed", "crashes") and the project's underscore signal
+  // format ("log_error", "test_failure"), which a \b-anchored regex breaks
+  // (\b treats `_` as a word char, so "error" inside "log_error" has no
+  // boundary). Changes vs. the pre-PR original:
+  //   - repair: removed "rollback"/"guard" — cross-cutting safety words common
+  //     in *optimize* skills (e.g. paranoia-ai-system-evolver lists "rollback"
+  //     in its safe-change method) that must not by themselves force repair.
+  //   - innovate: "add" is matched with a \b word boundary so it catches the
+  //     verb ("add a dashboard") without false-positives on address/additional/
+  //     padding (the pre-PR bare-substring "add" matched all of those). The
+  //     innovate set only reads natural-language description, so \b is safe here.
+  if (/error|fail|bug|crash|broken|incident|regress|debug|repair|fix/.test(hay)) {
+    return 'repair';
+  }
+  if (/feature|\badd\b|implement|new capability|capability|innovate|greenfield|prototype/.test(hay)) {
+    return 'innovate';
+  }
   return 'optimize';
 }
 
@@ -679,6 +757,7 @@ module.exports = {
   RATIONALE_TEXT,
   parseSkillMd,
   synthesizeGene,
+  inferCategory,
   detectForgery,
   assembleCapsule,
   runOnSkillInvocation,

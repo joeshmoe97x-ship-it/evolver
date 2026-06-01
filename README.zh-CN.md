@@ -159,7 +159,7 @@ evolver --loop
 **Evolver 是一个提示词生成器，不是代码修改器。** 每个进化周期：
 
 1. 扫描 `memory/` 目录中的运行日志、错误模式和信号。
-2. 从 `assets/gep/` 中选择最匹配的 [Gene 或 Capsule](https://evomap.ai/wiki)。
+2. 从本地 GEP 资产库中选择最匹配的 [Gene 或 Capsule](https://evomap.ai/wiki)。
 3. 输出一份严格的、受协议约束的 GEP 提示词来引导下一步进化。
 4. 记录可审计的 [EvolutionEvent](https://evomap.ai/wiki) 以便追溯。
 
@@ -351,16 +351,17 @@ WORKER_ENABLED=1 WORKER_DOMAINS=repair,harden WORKER_MAX_LOAD=3 evolver --loop
 
 本仓库内置基于 [GEP（基因组进化协议）](https://evomap.ai/wiki)的协议受限提示词模式。
 
-- **结构化资产目录**：`assets/gep/`
-  - `assets/gep/genes.json`
-  - `assets/gep/capsules.json`
-  - `assets/gep/events.jsonl`
+- **结构化运行时资产目录**：默认位于 `<workspace>/.evolver/gep/`
+  - `<workspace>/.evolver/gep/genes.json`
+  - `<workspace>/.evolver/gep/capsules.json`
+  - `<workspace>/.evolver/gep/events.jsonl`
+- 可通过 `GEP_ASSETS_DIR` 把运行时资产库放到其他位置。
 - **Selector 选择器**：根据日志提取 signals，优先复用已有 Gene/Capsule，并在提示词中输出可审计的 Selector 决策 JSON。
 - **约束**：除 🧬 外，禁止使用其他 emoji。
 
 ### 升级不再覆盖你的本地资产库
 
-`assets/gep/genes.json`、`assets/gep/capsules.json`、`assets/gep/events.jsonl` 属于你本地运行时。从 1.78.3 起，npm 发行包不再包含这三个文件，`npm i -g @evomap/evolver`（或公共仓库的 `git pull`）不会再覆盖你累积的 Gene、Capsule 和 EvolutionEvent。新装用户依然会通过 `assets/gep/genes.seed.json` 拿到引擎维护的 starter Gene —— 只有在本地 `genes.json` 不存在时才会应用一次。
+`<workspace>/.evolver/gep/genes.json`、`<workspace>/.evolver/gep/capsules.json`、`<workspace>/.evolver/gep/events.jsonl` 属于你本地运行时，并被 git 忽略。`assets/gep/` 保留给随包发布的 starter 资产。首次运行时，evolver 会把旧版遗留在 `assets/gep/` 的运行时文件复制到 `.evolver/gep/`，不会删除原文件；只有在本地 `genes.json` 不存在时，才会从随包 starter Gene 初始化。
 
 如果你之前用老版本被覆盖过，现在可以一键把所有被 Promoted 给你、以及你自己上传到 Hub 的资产拉回来：
 
@@ -370,7 +371,7 @@ A2A_HUB_URL=https://evomap.ai evolver sync --scope=all --export=backup.gepx
 
 它会去 `/a2a/assets/purchased`（被 Promoted 给你 + 自购）和 `/a2a/assets/published-by-me`（你自己发布的，含 draft）拉回完整 payload，直接回写 `genes.json` / `capsules.json`，并顺便打成 `.gepx` 整包备份。已购买过的 payload 这次重新拉取不收费。
 
-纯本地、从未上传过的资产 Hub 没有副本，只能从 git 历史恢复（例如 `git show <老tag>:assets/gep/genes.json > restored.json`）或从磁盘快照找回。
+纯本地、从未上传过的资产 Hub 没有副本，只能从 `.evolver/gep/`、旧版 `assets/gep/` checkout 或磁盘快照找回。
 
 ## 配置与解耦
 

@@ -51,7 +51,7 @@ describe('isCriticalProtectedPath', () => {
 
 describe('isConstraintCountedPath', () => {
   const defaultPolicy = {
-    excludePrefixes: ['logs/', 'memory/', 'assets/gep/', 'node_modules/'],
+    excludePrefixes: ['logs/', 'memory/', '.evolver/', 'assets/gep/', 'node_modules/'],
     excludeExact: ['event.json', 'temp_gep_output.json'],
     excludeRegex: ['capsule', 'events?\\.jsonl$'],
     includePrefixes: ['src/', 'scripts/'],
@@ -75,6 +75,7 @@ describe('isConstraintCountedPath', () => {
 
   it('excludes regex matches', () => {
     assert.equal(isConstraintCountedPath('assets/gep/capsules.json', defaultPolicy), false);
+    assert.equal(isConstraintCountedPath('.evolver/gep/genes.json', defaultPolicy), false);
   });
 
   it('includes exact root files', () => {

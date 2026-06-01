@@ -155,6 +155,18 @@ function start(opts) {
   _pollInterval = setInterval(function () {
     _tick().catch(function () { /* swallowed in _tick */ });
   }, _pollMs);
+  // .unref() so this background poller does NOT keep the Node event
+  // loop alive on its own. `evolver run` (single-shot) writes its
+  // artifacts and expects to exit — without unref, the setInterval
+  // handle pins the process and the run sits as a residual `node`
+  // process until manually killed (public issue #553). `evolver --loop`
+  // (daemon) keeps the foreground evolve loop alive on its own
+  // schedule, so an unref'd poller still polls — unref only changes
+  // whether THIS handle alone keeps the loop alive, not whether the
+  // handle fires.
+  if (_pollInterval && typeof _pollInterval.unref === 'function') {
+    _pollInterval.unref();
+  }
   // Do not await -- fire the first tick asynchronously so start() returns
   // immediately. This matches the autoBuyer start() semantics.
   _tick().catch(function () { /* swallowed in _tick */ });
@@ -189,6 +201,10 @@ module.exports = {
     writeLedger: _writeLedger,
     buildProofPayload: _buildProofPayload,
     resetForTests: _resetForTests,
+    // Test-only accessor for the active poll Timeout. Used to assert
+    // the timer was `.unref()`ed so it does not pin the Node event
+    // loop (regression guard for public issue #553).
+    getPollIntervalForTest: () => _pollInterval,
     constants: {
       DEFAULT_POLL_MS,
       MIN_POLL_MS,

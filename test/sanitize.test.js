@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { sanitizePayload, redactString } = require('../src/gep/sanitize');
+const { sanitizePayload, redactString, scanForLeaks, fullLeakCheck } = require('../src/gep/sanitize');
 
 const REDACTED = '[REDACTED]';
 
@@ -125,4 +125,181 @@ assert.strictEqual(sanitizePayload(undefined), undefined);
 assert.strictEqual(redactString(null), null);
 assert.strictEqual(redactString(123), 123);
 
-console.log('All sanitize tests passed (42 assertions)');
+// --- Allowlist for false positives (M-NEW-2 follow-up) ---
+// Goal: keep useful debug signal in capsules. The patterns above match a
+// broader-than-ideal set; this allowlist carves out a handful of
+// non-sensitive matches that we previously over-redacted.
+
+// CI runner paths — not user PII, useful for understanding capsule context.
+assert.strictEqual(
+  redactString('error in /home/runner/work/evolver/evolver/src/foo.js'),
+  'error in /home/runner/work/evolver/evolver/src/foo.js',
+  'GitHub Actions runner path must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('build failed at /home/circleci/project/test.js'),
+  'build failed at /home/circleci/project/test.js',
+  'CircleCI runner path must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('macOS CI: /Users/runner/work/repo/file.ts'),
+  'macOS CI: /Users/runner/work/repo/file.ts',
+  'GitHub Actions macOS runner path must NOT be redacted'
+);
+
+// Real user paths still redact.
+assert.ok(
+  redactString('opened /home/alice/secret/credentials.json').includes(REDACTED),
+  'real /home/<user>/ path must still be redacted'
+);
+assert.ok(
+  redactString('saved to /Users/bob/Documents/notes.txt').includes(REDACTED),
+  'real /Users/<user>/ path must still be redacted'
+);
+
+// Bot / no-reply email addresses — not personal.
+assert.strictEqual(
+  redactString('committed by noreply@github.com last week'),
+  'committed by noreply@github.com last week',
+  'noreply@github.com must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('SSH remote: git@github.com'),
+  'SSH remote: git@github.com',
+  'git@github.com SSH alias must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('author: 8275028+autogame-17@users.noreply.github.com'),
+  'author: 8275028+autogame-17@users.noreply.github.com',
+  'GitHub commit-author noreply must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('Do-Not-Reply@github.com'),
+  'Do-Not-Reply@github.com',
+  'donotreply prefix variants must NOT be redacted (case-insensitive), allowed host'
+);
+assert.strictEqual(
+  redactString('robot noreply@anthropic.com replied'),
+  'robot noreply@anthropic.com replied',
+  'noreply@anthropic.com must NOT be redacted (well-known public host)'
+);
+
+// Bugbot PR #151 Low: noreply on UNKNOWN domains must still redact, so a
+// corp infra domain like noreply@internal-codename.corp doesn't leak.
+assert.ok(
+  redactString('mail noreply@internal-codename.corp').includes(REDACTED),
+  'noreply on unknown corp domain must be redacted (no internal infra leak)'
+);
+assert.ok(
+  redactString('donotreply@private-saas.example').includes(REDACTED),
+  'donotreply on unknown domain must be redacted'
+);
+
+// Real personal emails still redact.
+assert.ok(
+  redactString('contact alice@personal.example').includes(REDACTED),
+  'real email must still be redacted'
+);
+assert.ok(
+  redactString('user.name@corp.example.com').includes(REDACTED),
+  'real email must still be redacted'
+);
+
+// `.env` references — prose mentions are NOT redacted; real paths still are.
+assert.strictEqual(
+  redactString('Read from `.env` file'),
+  'Read from `.env` file',
+  'prose mention of .env in backticks must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('the .env file is gitignored'),
+  'the .env file is gitignored',
+  'prose mention of .env must NOT be redacted'
+);
+assert.strictEqual(
+  redactString('Configure your .env before running'),
+  'Configure your .env before running',
+  'standalone .env in instructions must NOT be redacted'
+);
+assert.ok(
+  redactString('reading /etc/evolver/.env at startup').includes(REDACTED),
+  'real path /etc/.../.env must still be redacted (preceded by /)'
+);
+assert.ok(
+  redactString('loaded .env.production from disk').includes(REDACTED),
+  '.env.<suffix> form must still be redacted'
+);
+assert.ok(
+  redactString('config: .env.local overrides .env').includes(REDACTED),
+  '.env.local must still be redacted even when bare .env is in same string'
+);
+
+// --- Bugbot PR #151 Medium: scanForLeaks honours the same allowlist ---
+// selfPR uses fullLeakCheck to gate self-PR creation. If a leak is reported
+// the entire self-PR is blocked. Without applying the allowlist here too,
+// the redactor would say "this is fine" while the leak scanner blocked the
+// PR over the same false positives — a logical contradiction within the
+// same module.
+
+const ciPathScan = scanForLeaks('error in /home/runner/work/evolver/foo.js');
+assert.strictEqual(ciPathScan.found, false,
+  'scanForLeaks must NOT report /home/runner/ as a leak (allowlist)');
+assert.deepStrictEqual(ciPathScan.leaks, [],
+  'scanForLeaks must return empty leaks for CI runner path');
+
+const noreplyScan = scanForLeaks('committed by noreply@github.com');
+assert.strictEqual(noreplyScan.found, false,
+  'scanForLeaks must NOT report noreply@github.com as ssh_target leak (allowlist)');
+
+const sshAliasScan = scanForLeaks('git remote: git@github.com:evomap/evolver.git');
+assert.strictEqual(sshAliasScan.found, false,
+  'scanForLeaks must NOT report git@github.com as ssh_target leak (allowlist)');
+
+// Real PII paths / emails STILL trigger the leak scanner — allowlist is
+// narrowly scoped and the security guarantee for genuine secrets is intact.
+const realPathScan = scanForLeaks('opened /home/alice/.ssh/id_rsa');
+assert.strictEqual(realPathScan.found, true,
+  'scanForLeaks must still flag /home/<real-user>/ paths');
+assert.ok(
+  realPathScan.leaks.some((l) => l.type === 'local_path'),
+  'real local path leak must be classified as local_path'
+);
+
+const realSshScan = scanForLeaks('ssh deploy@prod.example.com');
+assert.strictEqual(realSshScan.found, true,
+  'scanForLeaks must still flag real SSH targets');
+
+const corpNoreplyScan = scanForLeaks('contact noreply@internal-codename.corp for details');
+assert.strictEqual(corpNoreplyScan.found, true,
+  'scanForLeaks must still flag noreply on unknown corp domains');
+
+// fullLeakCheck (pattern + env-value reverse scan) also honours the
+// allowlist via scanForLeaks. selfPR can now self-PR on a CI runner
+// without being blocked over the runner path.
+const fullClean = fullLeakCheck('build trace from /home/runner/work/evolver/evolver/src/foo.js by noreply@github.com');
+assert.strictEqual(fullClean.found, false,
+  'fullLeakCheck on CI-runner + GitHub-noreply content must return clean');
+
+// Bugbot PR #151 round 2 Medium: ssh_target scanner uses
+// `[a-zA-Z0-9_.-]+` (no `+` in char class), so for input
+// `8275028+autogame-17@users.noreply.github.com` it captures just
+// `autogame-17@users.noreply.github.com`. The full-form allowlist anchor
+// `^[0-9]+\+...` could not match the truncated value, so the leak scanner
+// reported a false positive. A second allowlist entry now covers any
+// local part on users.noreply.github.com.
+const ghCommitAuthorScan = scanForLeaks('author: 8275028+autogame-17@users.noreply.github.com');
+assert.strictEqual(ghCommitAuthorScan.found, false,
+  'scanForLeaks must NOT flag GitHub commit-author noreply, including the truncated suffix form');
+
+const ghCommitAuthorFull = fullLeakCheck('Co-Authored-By: 8275028+autogame-17@users.noreply.github.com');
+assert.strictEqual(ghCommitAuthorFull.found, false,
+  'fullLeakCheck must accept GitHub commit-author noreply even when the ssh_target scanner truncates the local part');
+
+// Defensive: any other local part on the GitHub noreply domain (e.g. legacy
+// `username@users.noreply.github.com` without the digits+ prefix) is also
+// allowlisted.
+const ghLegacyNoreply = scanForLeaks('opened by classicuser@users.noreply.github.com');
+assert.strictEqual(ghLegacyNoreply.found, false,
+  'scanForLeaks must NOT flag legacy GitHub noreply addresses (any local part)');
+
+console.log('All sanitize tests passed (68 assertions)');

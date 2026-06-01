@@ -12,6 +12,14 @@ const { getEvomapPath } = require('../../gep/paths');
 const NODE_ID_RE = /^node_[a-f0-9]{12,32}$/;
 
 const DEFAULT_HEARTBEAT_INTERVAL = 360_000;
+// Heartbeat backoff ceiling. Was 30min; reporter (#544) showed that
+// a single transient failure could park the loop at 30min and feel
+// indistinguishable from a daemon that had crashed. 15min sits above
+// `DEFAULT_HEARTBEAT_INTERVAL` (6min) so the `interval * 2^failures`
+// growth still has headroom — capping below the interval would invert
+// the backoff and make failures retry FASTER than success ticks.
+// 15min ≈ 2.5× the default, giving one full doubling step before park.
+const HEARTBEAT_BACKOFF_CAP_MS = 15 * 60_000;
 const HELLO_TIMEOUT = 15_000;
 const HEARTBEAT_TIMEOUT = 10_000;
 const MAX_REAUTH_ATTEMPTS = 2;
@@ -388,32 +396,38 @@ class LifecycleManager {
   }
 
   async heartbeat({ _skipReauth = false } = {}) {
+    // Wrap the entire body — including pre-fetch helpers (hello,
+    // getTaskMeta, store.countPending, env_fingerprint) — in a single
+    // try/catch. Reporter (#544) showed a single throw from any of
+    // these (store corrupt, hello rejecting, fingerprint failing under
+    // sandboxing) used to escape and kill `tick()`, leaving the
+    // daemon "alive but never heartbeating". The post-fetch path is
+    // unchanged; only the boundary moved earlier.
     if (!this.hubUrl) return { ok: false, error: 'no_hub_url' };
-
-    const nodeId = this.nodeId;
-    if (!nodeId) {
-      const helloResult = await this.hello();
-      if (!helloResult.ok) return helloResult;
-    }
-
-    const endpoint = `${this.hubUrl}/a2a/heartbeat`;
-    const taskMeta = typeof this.getTaskMeta === 'function' ? this.getTaskMeta() : {};
-    const fp = _getEnvFingerprint();
-    const body = {
-      node_id: this.nodeId,
-      sender_id: this.nodeId,
-      evolver_version: fp.evolver_version || PROXY_PROTOCOL_VERSION,
-      env_fingerprint: fp,
-      meta: {
-        proxy_version: PROXY_PROTOCOL_VERSION,
-        proxy_protocol_version: PROXY_PROTOCOL_VERSION,
-        outbound_pending: this.store.countPending({ direction: 'outbound' }),
-        inbound_pending: this.store.countPending({ direction: 'inbound' }),
-        ...taskMeta,
-      },
-    };
-
     try {
+      const nodeId = this.nodeId;
+      if (!nodeId) {
+        const helloResult = await this.hello();
+        if (!helloResult.ok) return helloResult;
+      }
+
+      const endpoint = `${this.hubUrl}/a2a/heartbeat`;
+      const taskMeta = typeof this.getTaskMeta === 'function' ? this.getTaskMeta() : {};
+      const fp = _getEnvFingerprint();
+      const body = {
+        node_id: this.nodeId,
+        sender_id: this.nodeId,
+        evolver_version: fp.evolver_version || PROXY_PROTOCOL_VERSION,
+        env_fingerprint: fp,
+        meta: {
+          proxy_version: PROXY_PROTOCOL_VERSION,
+          proxy_protocol_version: PROXY_PROTOCOL_VERSION,
+          outbound_pending: this.store.countPending({ direction: 'outbound' }),
+          inbound_pending: this.store.countPending({ direction: 'inbound' }),
+          ...taskMeta,
+        },
+      };
+
       const res = await hubFetch(endpoint, {
         method: 'POST',
         headers: this._buildHeaders(),
@@ -490,22 +504,68 @@ class LifecycleManager {
     if (this._running) return;
     this._running = true;
     this._startedAt = Date.now();
+    this._heartbeatInterval = Math.max(30_000, intervalMs || DEFAULT_HEARTBEAT_INTERVAL);
+    // Generation counter: every poke / stop bumps this. Tick captures
+    // its gen at entry; if it doesn't match on resume, the tick refuses
+    // to schedule its own next timer (a fresher path already owns it).
+    this._heartbeatGen = (this._heartbeatGen || 0) + 1;
+    this._heartbeatTick(this._heartbeatGen);
+  }
 
-    const interval = Math.max(30_000, intervalMs || DEFAULT_HEARTBEAT_INTERVAL);
-
-    const tick = async () => {
-      if (!this._running) return;
+  async _heartbeatTick(myGen) {
+    if (!this._running) return;
+    // Defence-in-depth: even with heartbeat() now fully wrapped (see
+    // its body), an unforeseen synchronous throw inside the awaited
+    // path or a defective stub passed in tests would still bubble
+    // into this closure as a rejected promise and cancel the next
+    // setTimeout. Catching here guarantees the loop schedules its
+    // own next tick under all conditions short of `stopHeartbeatLoop`.
+    try {
       await this.heartbeat();
-      if (this._running) {
-        const backoff = this._consecutiveFailures > 0
-          ? Math.min(interval * Math.pow(2, this._consecutiveFailures), 30 * 60_000)
-          : interval;
-        this._heartbeatTimer = setTimeout(tick, backoff);
-        if (this._heartbeatTimer.unref) this._heartbeatTimer.unref();
-      }
-    };
+    } catch (err) {
+      this._consecutiveFailures++;
+      this.logger.error(`[lifecycle] heartbeat tick threw (${this._consecutiveFailures}): ${err && err.message}`);
+    }
+    if (!this._running) return;
+    // Generation guard: a poke or stop fired while we were awaiting
+    // `heartbeat()`. The fresher path already armed its own timer (or
+    // tore the loop down); scheduling here would orphan the new timer
+    // or fork the loop into two concurrent ticks (Bugbot #147 finding
+    // 2026-05-28).
+    if (myGen !== undefined && myGen !== this._heartbeatGen) return;
+    // 15min cap (was 30min, then briefly 5min). Must stay above
+    // `DEFAULT_HEARTBEAT_INTERVAL` (6min) or the exponential branch
+    // retries faster than the success branch (Bugbot #147 finding).
+    const interval = this._heartbeatInterval || DEFAULT_HEARTBEAT_INTERVAL;
+    const backoff = this._consecutiveFailures > 0
+      ? Math.min(interval * Math.pow(2, this._consecutiveFailures), HEARTBEAT_BACKOFF_CAP_MS)
+      : interval;
+    const armedGen = this._heartbeatGen;
+    this._heartbeatTimer = setTimeout(() => this._heartbeatTick(armedGen), backoff);
+    if (this._heartbeatTimer.unref) this._heartbeatTimer.unref();
+  }
 
-    tick();
+  /// Reset the heartbeat schedule immediately. Call when an external
+  /// signal (Hub push, tab visibility, manual `evolver heartbeat now`)
+  /// indicates the next tick should not wait out its current backoff.
+  /// No-op when the loop is not running.
+  pokeHeartbeatLoop() {
+    if (!this._running) return;
+    if (this._heartbeatTimer) {
+      clearTimeout(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+    this._consecutiveFailures = 0;
+    // Bump generation: any in-flight `_heartbeatTick` from before the
+    // poke will see its captured gen mismatch on resume and skip its
+    // tail-`setTimeout`, so we don't end up with two concurrent timers.
+    this._heartbeatGen = (this._heartbeatGen || 0) + 1;
+    const myGen = this._heartbeatGen;
+    // setImmediate-equivalent: defer to the next event-loop turn so
+    // re-entrant pokes (e.g. from a Hub event handler) don't run
+    // synchronously inside the caller's frame.
+    this._heartbeatTimer = setTimeout(() => this._heartbeatTick(myGen), 0);
+    if (this._heartbeatTimer.unref) this._heartbeatTimer.unref();
   }
 
   stopHeartbeatLoop() {
@@ -532,4 +592,4 @@ class LifecycleManager {
   }
 }
 
-module.exports = { LifecycleManager, AuthError, DEFAULT_HEARTBEAT_INTERVAL };
+module.exports = { LifecycleManager, AuthError, DEFAULT_HEARTBEAT_INTERVAL, HEARTBEAT_BACKOFF_CAP_MS };

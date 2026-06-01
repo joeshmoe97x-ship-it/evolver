@@ -17,6 +17,7 @@ const {
   recordPR,
   _loadObfuscatedFromManifest,
   _resetObfuscatedCache,
+  _setManifestRetryTtlForTests,
 } = require('../src/gep/selfPR');
 
 const _OBFUSCATED_FILES = _loadObfuscatedFromManifest();
@@ -104,6 +105,91 @@ describe('isPublicNonObfuscated', () => {
       assert.ok(manifestList.has(f), f + ' is in selfPR OBFUSCATED_FILES but not in public.manifest.json');
     }
     assert.equal(_OBFUSCATED_FILES.size, manifestList.size, 'set sizes must match');
+  });
+});
+
+// --- loadObfuscatedFromManifest: retry after transient failure ---
+
+describe('loadObfuscatedFromManifest retry after transient failure', () => {
+  // Pre-fix: a single failed read of public.manifest.json (transient FS
+  // error, NFS hiccup, build script mid-write, permission flap) cached
+  // null forever. isPublicNonObfuscated would then reject every file via
+  // the fail-safe branch, silently disabling self-PR for the entire
+  // daemon lifetime with no recovery short of a process restart. With
+  // the retry-after-TTL fix, the next call after MANIFEST_RETRY_TTL_MS
+  // re-reads the manifest and recovers.
+
+  const origReadFileSync = fs.readFileSync;
+  let manifestFailCount = 0;
+
+  beforeEach(() => {
+    _resetObfuscatedCache();
+    manifestFailCount = 0;
+    // Set TTL to 0 so any failed-load timestamp is immediately expired;
+    // tests don't have to sleep to exercise the retry path.
+    _setManifestRetryTtlForTests(0);
+    fs.readFileSync = function (p, ...rest) {
+      if (manifestFailCount > 0 && String(p).endsWith('public.manifest.json')) {
+        manifestFailCount -= 1;
+        const err = new Error('simulated transient FS error');
+        err.code = 'EIO';
+        throw err;
+      }
+      return origReadFileSync.call(fs, p, ...rest);
+    };
+  });
+
+  afterEach(() => {
+    fs.readFileSync = origReadFileSync;
+    _resetObfuscatedCache();
+  });
+
+  it('retries after a transient failure and recovers on the next call', () => {
+    manifestFailCount = 1;
+    const first = _loadObfuscatedFromManifest();
+    assert.equal(first, null, 'first call must surface the failure as cached null');
+    // TTL=0 from beforeEach means the very next call is allowed to retry.
+    const second = _loadObfuscatedFromManifest();
+    assert.ok(second instanceof Set, 'second call must retry and load the real manifest');
+    assert.ok(second.size > 0, 'real manifest must have at least one obfuscated entry');
+  });
+
+  it('does NOT retry while inside the TTL window', () => {
+    // Restore a non-zero TTL so the retry guard actually engages.
+    _setManifestRetryTtlForTests(5 * 60 * 1000);
+    manifestFailCount = 1;
+    const first = _loadObfuscatedFromManifest();
+    assert.equal(first, null);
+    // Inside the TTL window: even with the FS now working, the cached null
+    // is returned without re-reading from disk. (manifestFailCount stays at
+    // 0 the whole time, proving readFileSync was not invoked on the manifest
+    // path for the second call.)
+    let readsDuringRetry = 0;
+    const prev = fs.readFileSync;
+    fs.readFileSync = function (p, ...rest) {
+      if (String(p).endsWith('public.manifest.json')) readsDuringRetry += 1;
+      return prev.call(fs, p, ...rest);
+    };
+    try {
+      const second = _loadObfuscatedFromManifest();
+      assert.equal(second, null, 'cached null must persist within the TTL window');
+      assert.equal(readsDuringRetry, 0, 'no FS read should happen while inside TTL');
+    } finally {
+      fs.readFileSync = prev;
+    }
+  });
+
+  it('keeps a successful load sticky (no re-read once loaded)', () => {
+    // Healthy load on the first call.
+    const first = _loadObfuscatedFromManifest();
+    assert.ok(first instanceof Set);
+    // Now force the FS to start failing — the cached Set must still be
+    // returned without re-reading, because successful loads are sticky
+    // (manifest is read-only at runtime).
+    manifestFailCount = 99;
+    const second = _loadObfuscatedFromManifest();
+    assert.equal(second, first, 'successful cache must be returned by identity');
+    assert.equal(manifestFailCount, 99, 'no FS read should be triggered after success');
   });
 });
 
