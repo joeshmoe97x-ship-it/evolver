@@ -31,6 +31,7 @@
     "a2a:export": "node scripts/a2a_export.js",
     "a2a:ingest": "node scripts/a2a_ingest.js",
     "a2a:promote": "node scripts/a2a_promote.js",
+    "release:v2-assets": "node scripts/upload_v2_release_assets.js",
     "test": "node -e \"const fs=require('fs'),cp=require('child_process');const all=fs.readdirSync('test').filter(f=>f.endsWith('.test.js'));const iso=new Set(['solidifyIntegration.test.js']);const others=all.filter(f=>!iso.has(f)).map(f=>'test/'+f);const isoFiles=all.filter(f=>iso.has(f)).map(f=>'test/'+f);if(others.length)cp.execSync('node --test '+others.join(' '),{stdio:'inherit'});if(isoFiles.length)cp.execSync('node --test '+isoFiles.join(' '),{stdio:'inherit'})\""
   },
   "engines": {
