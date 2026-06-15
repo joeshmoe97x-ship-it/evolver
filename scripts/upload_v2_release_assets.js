@@ -78,6 +78,10 @@ function normalizeTag(tag) {
   return tag;
 }
 
+function versionFromTag(tag) {
+  return normalizeTag(tag).replace(/^v/, '');
+}
+
 function resolveAssetDir(assetDir, cwd = process.cwd()) {
   const resolved = path.resolve(cwd, assetDir);
   const linkStat = fs.lstatSync(resolved);
@@ -139,6 +143,33 @@ function parseManifest(text) {
   }
 
   return entries;
+}
+
+function hostBinaryName(platform = process.platform, arch = process.arch) {
+  const normalizedArch = arch === 'arm64' ? 'arm64' : arch === 'x64' ? 'x64' : null;
+  if (!normalizedArch) return null;
+  if (platform === 'darwin') return `evolver-v2-darwin-${normalizedArch}`;
+  if (platform === 'linux') return `evolver-v2-linux-${normalizedArch}`;
+  if (platform === 'win32') return normalizedArch === 'x64' ? 'evolver-v2-windows-x64.exe' : null;
+  return null;
+}
+
+function validateHostBinaryVersion(assetDir, expectedVersion, run = spawnSync, platform = process.platform, arch = process.arch) {
+  const fileName = hostBinaryName(platform, arch);
+  if (!fileName) return { checked: false, reason: `unsupported host ${platform}/${arch}` };
+
+  const filePath = path.join(assetDir, fileName);
+  assertPlainFile(filePath, fileName);
+
+  const result = run(filePath, ['--version'], { encoding: 'utf8', timeout: 15000 });
+  if (result.error) throw result.error;
+
+  const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
+  if (result.status !== 0 || output !== expectedVersion) {
+    throw new Error(`${fileName} --version mismatch: expected ${expectedVersion}, got ${JSON.stringify(output)} (exit ${result.status})`);
+  }
+
+  return { checked: true, fileName, version: output };
 }
 
 function validateV2Assets(assetDir) {
@@ -221,12 +252,19 @@ function main(argv = process.argv.slice(2)) {
   }
 
   const tag = normalizeTag(opts.tag);
+  const expectedVersion = versionFromTag(tag);
   const validation = validateV2Assets(opts.assetDir);
+  const versionCheck = validateHostBinaryVersion(validation.dir, expectedVersion);
   const uploadArgs = buildGhReleaseUploadArgs(tag, validation.uploadFiles, opts);
 
   console.log(`[upload-v2-release-assets] validated ${V2_BINARIES.length} binaries in ${validation.dir}`);
   for (const fileName of V2_BINARIES) {
     console.log(`  ${fileName}: ${validation.hashes.get(fileName)}`);
+  }
+  if (versionCheck.checked) {
+    console.log(`  ${versionCheck.fileName} --version: ${versionCheck.version}`);
+  } else {
+    console.log(`  host binary version check skipped: ${versionCheck.reason}`);
   }
   console.log(`\n  gh ${uploadArgs.map(quoteArg).join(' ')}`);
 
@@ -254,11 +292,14 @@ module.exports = {
   V2_BINARIES,
   V2_MANIFEST,
   buildGhReleaseUploadArgs,
+  hostBinaryName,
   main,
   normalizeTag,
   parseArgs,
   parseManifest,
   parseSha256Line,
   sha256File,
+  validateHostBinaryVersion,
   validateV2Assets,
+  versionFromTag,
 };

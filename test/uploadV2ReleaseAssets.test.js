@@ -12,9 +12,12 @@ const {
   V2_BINARIES,
   V2_MANIFEST,
   buildGhReleaseUploadArgs,
+  hostBinaryName,
   normalizeTag,
   parseArgs,
+  validateHostBinaryVersion,
   validateV2Assets,
+  versionFromTag,
 } = require('../scripts/upload_v2_release_assets');
 
 function sha256Text(text) {
@@ -120,6 +123,54 @@ test('normalizeTag requires a GitHub release-style semver tag', () => {
   assert.equal(normalizeTag('v1.89.11-beta.1'), 'v1.89.11-beta.1');
   assert.throws(() => normalizeTag('1.89.11'), /invalid --tag/);
   assert.throws(() => normalizeTag('v1.89;echo bad'), /invalid --tag/);
+});
+
+test('versionFromTag strips the release tag prefix for binary version checks', () => {
+  assert.equal(versionFromTag('v1.89.11'), '1.89.11');
+  assert.equal(versionFromTag('v1.89.11-beta.1'), '1.89.11-beta.1');
+});
+
+test('hostBinaryName maps supported upload hosts to the expected v2 asset', () => {
+  assert.equal(hostBinaryName('darwin', 'arm64'), 'evolver-v2-darwin-arm64');
+  assert.equal(hostBinaryName('darwin', 'x64'), 'evolver-v2-darwin-x64');
+  assert.equal(hostBinaryName('linux', 'x64'), 'evolver-v2-linux-x64');
+  assert.equal(hostBinaryName('linux', 'arm64'), 'evolver-v2-linux-arm64');
+  assert.equal(hostBinaryName('win32', 'x64'), 'evolver-v2-windows-x64.exe');
+  assert.equal(hostBinaryName('win32', 'arm64'), null);
+});
+
+test('validateHostBinaryVersion accepts the host binary only when --version matches the release tag', () => {
+  const dir = makeAssetDir();
+  try {
+    const result = validateHostBinaryVersion(
+      dir,
+      '1.89.11',
+      () => ({ status: 0, stdout: '1.89.11\n', stderr: '' }),
+      'linux',
+      'x64',
+    );
+    assert.deepEqual(result, { checked: true, fileName: 'evolver-v2-linux-x64', version: '1.89.11' });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validateHostBinaryVersion rejects stale dev-version binaries', () => {
+  const dir = makeAssetDir();
+  try {
+    assert.throws(
+      () => validateHostBinaryVersion(
+        dir,
+        '1.89.11',
+        () => ({ status: 0, stdout: '0.0.0\n', stderr: '' }),
+        'linux',
+        'x64',
+      ),
+      /--version mismatch/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('parseArgs treats --dry-run as explicit validate-only mode', () => {
