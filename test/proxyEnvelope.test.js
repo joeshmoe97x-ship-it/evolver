@@ -118,7 +118,7 @@ function readBody(req) {
 
 describe('proxy /asset/* -> hub envelope wrapping (e2e)', () => {
   let hub, hubUrl, proxy, proxyUrl, dataDir;
-  const seen = { fetch: [], validate: [], search: [] };
+  const seen = { fetch: [], validate: [], search: [], record: [] };
 
   before(async () => {
     hub = http.createServer(async (req, res) => {
@@ -155,6 +155,15 @@ describe('proxy /asset/* -> hub envelope wrapping (e2e)', () => {
         const err = hubValidate(body, ['validate', 'publish']);
         if (err) return respond(400, { error: err });
         return respond(200, { protocol: 'gep-a2a', message_type: 'validate', payload: { valid: true } });
+      }
+      if (req.url === '/a2a/memory/record') {
+        seen.record.push(body);
+        // The hub reads a FLAT top-level body here (not the GEP envelope):
+        // it 400s on missing/empty top-level signals.
+        if (!body || !Array.isArray(body.signals) || body.signals.length === 0) {
+          return respond(400, { error: 'signals required' });
+        }
+        return respond(200, { ok: true, recorded: 'mge_test' });
       }
       const parsedUrl = new URL(req.url, 'http://localhost');
       if (parsedUrl.pathname === '/a2a/assets/search') {
@@ -246,5 +255,25 @@ describe('proxy /asset/* -> hub envelope wrapping (e2e)', () => {
       limit: '5',
       node_id: proxy.store.getState('node_id'),
     });
+  });
+
+  it('POST /asset/report-reuse forwards a FLAT (non-enveloped) body to /a2a/memory/record', async () => {
+    const res = await post('/asset/report-reuse', {
+      used_asset_ids: ['sha256:r1', 'sha256:r2'],
+      status: 'success',
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.recorded, 'mge_test');
+
+    const sent = seen.record.at(-1);
+    // FLAT body: sender_id/signals/status/used_asset_ids live at the TOP level,
+    // NOT under .payload -- the hub's /a2a/memory/record reads them top-level,
+    // so envelope-wrapping (like fetch/validate) would make the record 400.
+    assert.equal(sent.payload, undefined, 'must NOT be a GEP envelope');
+    assert.equal(sent.sender_id, proxy.store.getState('node_id'));
+    assert.equal(sent.status, 'success');
+    assert.deepEqual(sent.used_asset_ids, ['sha256:r1', 'sha256:r2']);
+    assert.ok(Array.isArray(sent.signals) && sent.signals.length > 0, 'non-empty signals default applied');
   });
 });

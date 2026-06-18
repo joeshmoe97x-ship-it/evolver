@@ -362,6 +362,11 @@ class AuthError extends Error {
   }
 }
 
+function parseNodeSecretVersion(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 class LifecycleManager {
   constructor({ hubUrl, store, logger, getTaskMeta } = {}) {
     this.hubUrl = (hubUrl || process.env.A2A_HUB_URL || '').replace(/\/+$/, '');
@@ -433,6 +438,24 @@ class LifecycleManager {
     return this._resolveNodeSecret();
   }
 
+  get nodeSecretVersion() {
+    const storeVersion = parseNodeSecretVersion(this.store.getState('node_secret_version'));
+    const storeSecret = this.store.getState('node_secret') || null;
+    const storeSource = this.store.getState('node_secret_source') || null;
+    const envSecret = this._suppressEnvSecret
+      ? null
+      : ((process.env.A2A_NODE_SECRET || process.env.EVOMAP_NODE_SECRET || '').trim() || null);
+    const envVersion = parseNodeSecretVersion(process.env.A2A_NODE_SECRET_VERSION || process.env.EVOMAP_NODE_SECRET_VERSION);
+    const validStoreSecret = typeof storeSecret === 'string' && /^[a-f0-9]{64}$/i.test(storeSecret);
+    if (this._suppressEnvSecret) return validStoreSecret ? storeVersion : null;
+    if (storeSource === 'hub_rotate' && validStoreSecret) return storeVersion;
+    if (envSecret) {
+      if (envVersion) return envVersion;
+      return storeSecret === envSecret ? storeVersion : null;
+    }
+    return validStoreSecret ? storeVersion : null;
+  }
+
   /**
    * Resolve the active node_secret with conflict reconciliation between the
    * persistent MailboxStore and `process.env.A2A_NODE_SECRET`.
@@ -466,7 +489,7 @@ class LifecycleManager {
   _resolveNodeSecret() {
     const envSecret = this._suppressEnvSecret
       ? null
-      : ((process.env.A2A_NODE_SECRET || '').trim() || null);
+      : ((process.env.A2A_NODE_SECRET || process.env.EVOMAP_NODE_SECRET || '').trim() || null);
     const storeSecret = this.store.getState('node_secret') || null;
     const storeSource = this.store.getState('node_secret_source') || null;
     const valid = (s) => typeof s === 'string' && /^[a-f0-9]{64}$/i.test(s);
@@ -489,7 +512,9 @@ class LifecycleManager {
         return storeSecret;
       }
       if (valid(envSecret)) {
+        const envVersion = parseNodeSecretVersion(process.env.A2A_NODE_SECRET_VERSION || process.env.EVOMAP_NODE_SECRET_VERSION);
         this.store.setState('node_secret', envSecret);
+        this.store.setState('node_secret_version', envVersion ? String(envVersion) : '');
         // Mark the new store value as env-seeded so a future rotation can
         // distinguish "operator pasted this in" from "hub returned this".
         this.store.setState('node_secret_source', 'env_seed');
@@ -513,6 +538,8 @@ class LifecycleManager {
     const headers = { 'Content-Type': 'application/json' };
     const secret = this.nodeSecret;
     if (secret) headers['Authorization'] = 'Bearer ' + secret;
+    const secretVersion = this.nodeSecretVersion;
+    if (secretVersion) headers['X-EvoMap-Node-Secret-Version'] = String(secretVersion);
     headers['x-correlation-id'] = crypto.randomUUID();
     return headers;
   }
@@ -600,6 +627,7 @@ class LifecycleManager {
       }
 
       const secret = data?.payload?.node_secret || data?.node_secret || null;
+      const secretVersion = parseNodeSecretVersion(data?.payload?.node_secret_version || data?.node_secret_version);
       if (secret && /^[a-f0-9]{64}$/i.test(secret)) {
         this.store.setState('node_secret', secret);
         // Tag the store entry so the next process that boots into a stale
@@ -617,6 +645,11 @@ class LifecycleManager {
         // and the Bugbot review on PR #22).
         this._suppressEnvSecret = true;
         this.logger.log('[lifecycle] new node_secret stored from hello response');
+      }
+      if (secretVersion) {
+        this.store.setState('node_secret_version', String(secretVersion));
+      } else {
+        this.store.setState('node_secret_version', '');
       }
 
       this.store.setState('node_id', nodeId);
@@ -770,6 +803,7 @@ class LifecycleManager {
   _dropLocalSecret(reason) {
     this.logger.warn(`[lifecycle] dropping cached node_secret (reason=${reason}); next hello will run unauthenticated`);
     try { this.store.setState('node_secret', ''); } catch { /* best-effort */ }
+    try { this.store.setState('node_secret_version', ''); } catch { /* best-effort */ }
     // Clear the source tag too -- nothing is stored, nothing to attribute.
     try { this.store.setState('node_secret_source', ''); } catch { /* best-effort */ }
     try { this.store.setState('node_secret_env_suppressed', 'true'); } catch { /* best-effort */ }
@@ -824,6 +858,7 @@ class LifecycleManager {
       const endpoint = `${this.hubUrl}/a2a/heartbeat`;
       const taskMeta = typeof this.getTaskMeta === 'function' ? this.getTaskMeta() : {};
       const fp = _getEnvFingerprint();
+      const secretVersion = this.nodeSecretVersion;
       const body = {
         node_id: this.nodeId,
         sender_id: this.nodeId,
@@ -837,6 +872,10 @@ class LifecycleManager {
           ...taskMeta,
         },
       };
+      if (secretVersion) {
+        body.node_secret_version = secretVersion;
+        body.meta.node_secret_version = secretVersion;
+      }
 
       try {
         const cfg = require('../../config');

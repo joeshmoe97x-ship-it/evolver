@@ -284,6 +284,11 @@ class EvoMapProxy {
       assetSearch: (body) => this._assetSearch(body),
       assetValidate: (body) => this._proxyHttp('/a2a/validate', this._wrapA2a('validate', body)),
       assetPublish: (body) => this._assetPublish(body),
+      // Reuse-attribution report -> hub /a2a/memory/record. FLAT body (not an
+      // envelope): the record endpoint reads sender_id/signals/used_asset_ids at
+      // the top level, so this goes through _reportReuse (like the lenient REST
+      // search path), not _wrapA2a.
+      reportReuse: (body) => this._reportReuse(body),
       // ATP passthrough (#460 Bug 2): merchant/consumer flows that used to call
       // hub directly via src/atp/hubClient.js must route through the proxy when
       // EVOMAP_PROXY=1 so proxy sees the transaction (for audit + offline queue).
@@ -613,6 +618,51 @@ class EvoMapProxy {
   // dedup, and Retry-After-aware cooldown. Preserves the original return shape
   // and the 429 error contract so existing callers (and their "proceed on local
   // evidence" fallback) are unaffected.
+  // Report which fetched assets the agent reused, so the hub credits their
+  // authors (reuse-reward attribution). Unlike fetch/validate (strict GEP-A2A
+  // envelopes), the hub's /a2a/memory/record reads a FLAT top-level body
+  // ({sender_id, signals, status, used_asset_ids}); envelope-wrapping would bury
+  // those under .payload and the record would 400. The proxy reports as its OWN
+  // node -- the same node that fetched the asset -- so the hub's buildAttribution
+  // finds the matching AssetFetcher row (cross-owner + GDI verified hub-side).
+  // Declaration model, never server-inferred. Best-effort: a report failure
+  // (insufficient credits, hub error) must never break the agent's session.
+  // Kill-switch: EVOLVER_PROXY_REPORT_REUSE=0.
+  async _reportReuse(body) {
+    if (process.env.EVOLVER_PROXY_REPORT_REUSE === '0') {
+      return { ok: false, reason: 'report_reuse_disabled' };
+    }
+    const nodeId = this.store.getState('node_id');
+    if (!nodeId) return { ok: false, reason: 'no_node_id' };
+
+    const b = body || {};
+    const used = Array.isArray(b.used_asset_ids)
+      ? b.used_asset_ids.filter((x) => typeof x === 'string' && x.length > 0 && x.length <= 200).slice(0, 50)
+      : [];
+    if (used.length === 0) return { ok: false, reason: 'no_used_asset_ids' };
+
+    let signals = Array.isArray(b.signals)
+      ? b.signals.filter((s) => typeof s === 'string' && s.length > 0).slice(0, 32)
+      : [];
+    if (signals.length === 0) signals = ['reused_via_mcp'];
+
+    const flat = {
+      sender_id: nodeId,
+      signals,
+      status: b.status === 'failed' ? 'failed' : 'success',
+      used_asset_ids: used,
+      ...(typeof b.score === 'number' ? { score: b.score } : {}),
+    };
+
+    try {
+      const res = await this._proxyHttp('/a2a/memory/record', flat);
+      return { ok: true, recorded: res && res.recorded, used_asset_ids: used };
+    } catch (err) {
+      this.logger?.warn?.(`[proxy] report-reuse failed: ${err.message}`);
+      return { ok: false, reason: err.message, statusCode: err.statusCode };
+    }
+  }
+
   async _assetSearch(body) {
     const plan = this._planAssetSearchWithNode(body);
     const key = this._assetSearchCacheKey(plan);

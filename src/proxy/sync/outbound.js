@@ -66,7 +66,7 @@ class OutboundSync {
       if (m.type !== 'proxy_trace') continue;
       if (!traceUploadEnabled) {
         rejectedTraceUploads.push({ id: m.id, error: 'proxy trace upload disabled' });
-      } else if (!isProxyTraceUploadPayloadAllowed(m.payload, process.env)) {
+      } else if (!isProxyTraceUploadPayloadAllowed(m.payload, process.env, { store: this.store })) {
         rejectedTraceUploads.push({ id: m.id, error: 'proxy trace payload rejected' });
       }
     }

@@ -152,6 +152,198 @@ test('nodeSecret getter: store wins when its value was last written by hub_rotat
   }
 });
 
+test('nodeSecretVersion getter: env secret without env version does not reuse stale store version', () => {
+  const originalSecret = process.env.A2A_NODE_SECRET;
+  const originalVersion = process.env.A2A_NODE_SECRET_VERSION;
+  const originalEvoVersion = process.env.EVOMAP_NODE_SECRET_VERSION;
+  try {
+    process.env.A2A_NODE_SECRET = VALID_HEX64_A;
+    delete process.env.A2A_NODE_SECRET_VERSION;
+    delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    const store = makeStore({
+      node_secret: VALID_HEX64_B,
+      node_secret_version: '8',
+      node_secret_source: 'env_seed',
+    });
+    const mgr = new LifecycleManager({ hubUrl: 'https://example.test', store, logger: silentLogger() });
+
+    assert.strictEqual(mgr.nodeSecret, VALID_HEX64_A, 'env secret should still win for auth');
+    assert.strictEqual(mgr.nodeSecretVersion, null, 'stale store version must not follow a different env secret');
+  } finally {
+    if (originalSecret === undefined) delete process.env.A2A_NODE_SECRET;
+    else process.env.A2A_NODE_SECRET = originalSecret;
+    if (originalVersion === undefined) delete process.env.A2A_NODE_SECRET_VERSION;
+    else process.env.A2A_NODE_SECRET_VERSION = originalVersion;
+    if (originalEvoVersion === undefined) delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    else process.env.EVOMAP_NODE_SECRET_VERSION = originalEvoVersion;
+  }
+});
+
+test('nodeSecretVersion getter: hub-rotated store without version does not reuse stale env version', () => {
+  const originalSecret = process.env.A2A_NODE_SECRET;
+  const originalEvoSecret = process.env.EVOMAP_NODE_SECRET;
+  const originalVersion = process.env.A2A_NODE_SECRET_VERSION;
+  const originalEvoVersion = process.env.EVOMAP_NODE_SECRET_VERSION;
+  try {
+    process.env.A2A_NODE_SECRET = VALID_HEX64_A;
+    delete process.env.EVOMAP_NODE_SECRET;
+    process.env.A2A_NODE_SECRET_VERSION = '1';
+    delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    const store = makeStore({
+      node_secret: VALID_HEX64_B,
+      node_secret_source: 'hub_rotate',
+    });
+    const mgr = new LifecycleManager({ hubUrl: 'https://example.test', store, logger: silentLogger() });
+
+    assert.strictEqual(mgr.nodeSecret, VALID_HEX64_B, 'hub-rotated store secret should win');
+    assert.strictEqual(mgr.nodeSecretVersion, null, 'stale env version must not follow hub-rotated store secret');
+  } finally {
+    if (originalSecret === undefined) delete process.env.A2A_NODE_SECRET;
+    else process.env.A2A_NODE_SECRET = originalSecret;
+    if (originalEvoSecret === undefined) delete process.env.EVOMAP_NODE_SECRET;
+    else process.env.EVOMAP_NODE_SECRET = originalEvoSecret;
+    if (originalVersion === undefined) delete process.env.A2A_NODE_SECRET_VERSION;
+    else process.env.A2A_NODE_SECRET_VERSION = originalVersion;
+    if (originalEvoVersion === undefined) delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    else process.env.EVOMAP_NODE_SECRET_VERSION = originalEvoVersion;
+  }
+});
+
+test('nodeSecretVersion getter: orphan env version does not attach to store secret', () => {
+  const originalSecret = process.env.A2A_NODE_SECRET;
+  const originalEvoSecret = process.env.EVOMAP_NODE_SECRET;
+  const originalVersion = process.env.A2A_NODE_SECRET_VERSION;
+  const originalEvoVersion = process.env.EVOMAP_NODE_SECRET_VERSION;
+  try {
+    delete process.env.A2A_NODE_SECRET;
+    delete process.env.EVOMAP_NODE_SECRET;
+    process.env.A2A_NODE_SECRET_VERSION = '1';
+    delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    const store = makeStore({
+      node_secret: VALID_HEX64_B,
+      node_secret_source: 'hub_rotate',
+    });
+    const mgr = new LifecycleManager({ hubUrl: 'https://example.test', store, logger: silentLogger() });
+
+    assert.strictEqual(mgr.nodeSecret, VALID_HEX64_B, 'store secret should still be usable');
+    assert.strictEqual(mgr.nodeSecretVersion, null, 'orphan env version must not describe store secret');
+  } finally {
+    if (originalSecret === undefined) delete process.env.A2A_NODE_SECRET;
+    else process.env.A2A_NODE_SECRET = originalSecret;
+    if (originalEvoSecret === undefined) delete process.env.EVOMAP_NODE_SECRET;
+    else process.env.EVOMAP_NODE_SECRET = originalEvoSecret;
+    if (originalVersion === undefined) delete process.env.A2A_NODE_SECRET_VERSION;
+    else process.env.A2A_NODE_SECRET_VERSION = originalVersion;
+    if (originalEvoVersion === undefined) delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    else process.env.EVOMAP_NODE_SECRET_VERSION = originalEvoVersion;
+  }
+});
+
+test('nodeSecretVersion getter: EVOMAP_NODE_SECRET pair is source-bound', () => {
+  const originalSecret = process.env.A2A_NODE_SECRET;
+  const originalEvoSecret = process.env.EVOMAP_NODE_SECRET;
+  const originalVersion = process.env.A2A_NODE_SECRET_VERSION;
+  const originalEvoVersion = process.env.EVOMAP_NODE_SECRET_VERSION;
+  try {
+    delete process.env.A2A_NODE_SECRET;
+    delete process.env.A2A_NODE_SECRET_VERSION;
+    process.env.EVOMAP_NODE_SECRET = VALID_HEX64_A;
+    process.env.EVOMAP_NODE_SECRET_VERSION = '9';
+    const store = makeStore({
+      node_secret: VALID_HEX64_B,
+      node_secret_version: '8',
+      node_secret_source: 'env_seed',
+    });
+    const mgr = new LifecycleManager({ hubUrl: 'https://example.test', store, logger: silentLogger() });
+
+    assert.strictEqual(mgr.nodeSecret, VALID_HEX64_A, 'EVOMAP env secret should win like A2A env secret');
+    assert.strictEqual(mgr.nodeSecretVersion, 9, 'EVOMAP env version must stay paired with EVOMAP env secret');
+  } finally {
+    if (originalSecret === undefined) delete process.env.A2A_NODE_SECRET;
+    else process.env.A2A_NODE_SECRET = originalSecret;
+    if (originalEvoSecret === undefined) delete process.env.EVOMAP_NODE_SECRET;
+    else process.env.EVOMAP_NODE_SECRET = originalEvoSecret;
+    if (originalVersion === undefined) delete process.env.A2A_NODE_SECRET_VERSION;
+    else process.env.A2A_NODE_SECRET_VERSION = originalVersion;
+    if (originalEvoVersion === undefined) delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    else process.env.EVOMAP_NODE_SECRET_VERSION = originalEvoVersion;
+  }
+});
+
+test('hello: successful response without node_secret_version clears stale store version', async () => {
+  const originalSecret = process.env.A2A_NODE_SECRET;
+  const originalVersion = process.env.A2A_NODE_SECRET_VERSION;
+  const originalEvoVersion = process.env.EVOMAP_NODE_SECRET_VERSION;
+  const originalFetch = global.fetch;
+  try {
+    delete process.env.A2A_NODE_SECRET;
+    delete process.env.A2A_NODE_SECRET_VERSION;
+    delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    const store = makeStore({
+      node_id: 'node_test',
+      node_secret: VALID_HEX64_A,
+      node_secret_version: '7',
+      node_secret_source: 'hub_rotate',
+    });
+    global.fetch = mockFetch(() => responseFromJson({
+      status: 200,
+      json: { payload: { status: 'acknowledged', your_node_id: 'node_test' } },
+    }));
+
+    const mgr = new LifecycleManager({ hubUrl: 'https://example.test', store, logger: silentLogger() });
+    const result = await mgr.hello();
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(store.getState('node_secret_version'), '', 'missing version from hub must clear stale store version');
+    assert.strictEqual(mgr.nodeSecretVersion, null, 'cleared store must not keep emitting version metadata');
+  } finally {
+    if (originalSecret === undefined) delete process.env.A2A_NODE_SECRET;
+    else process.env.A2A_NODE_SECRET = originalSecret;
+    if (originalVersion === undefined) delete process.env.A2A_NODE_SECRET_VERSION;
+    else process.env.A2A_NODE_SECRET_VERSION = originalVersion;
+    if (originalEvoVersion === undefined) delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    else process.env.EVOMAP_NODE_SECRET_VERSION = originalEvoVersion;
+    global.fetch = originalFetch;
+  }
+});
+
+test('hello: successful response with node_secret_version refreshes store version without rotating secret', async () => {
+  const originalSecret = process.env.A2A_NODE_SECRET;
+  const originalVersion = process.env.A2A_NODE_SECRET_VERSION;
+  const originalEvoVersion = process.env.EVOMAP_NODE_SECRET_VERSION;
+  const originalFetch = global.fetch;
+  try {
+    delete process.env.A2A_NODE_SECRET;
+    delete process.env.A2A_NODE_SECRET_VERSION;
+    delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    const store = makeStore({
+      node_id: 'node_test',
+      node_secret: VALID_HEX64_A,
+      node_secret_version: '7',
+      node_secret_source: 'hub_rotate',
+    });
+    global.fetch = mockFetch(() => responseFromJson({
+      status: 200,
+      json: { payload: { status: 'acknowledged', node_secret_version: 9, your_node_id: 'node_test' } },
+    }));
+
+    const mgr = new LifecycleManager({ hubUrl: 'https://example.test', store, logger: silentLogger() });
+    const result = await mgr.hello();
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(store.getState('node_secret_version'), '9', 'hub-returned version must be stored');
+    assert.strictEqual(mgr.nodeSecretVersion, 9);
+  } finally {
+    if (originalSecret === undefined) delete process.env.A2A_NODE_SECRET;
+    else process.env.A2A_NODE_SECRET = originalSecret;
+    if (originalVersion === undefined) delete process.env.A2A_NODE_SECRET_VERSION;
+    else process.env.A2A_NODE_SECRET_VERSION = originalVersion;
+    if (originalEvoVersion === undefined) delete process.env.EVOMAP_NODE_SECRET_VERSION;
+    else process.env.EVOMAP_NODE_SECRET_VERSION = originalEvoVersion;
+    global.fetch = originalFetch;
+  }
+});
+
 test('nodeSecret getter: malformed env var falls back to store', () => {
   const original = process.env.A2A_NODE_SECRET;
   try {
@@ -257,12 +449,16 @@ test('reAuthenticate: env var does NOT undo a successful rotation during verific
     const store = makeStore({ node_id: 'node_test', node_secret: VALID_HEX64_X });
 
     const seenAuthHeaders = [];
+    const seenVersionHeaders = [];
+    const seenBodies = [];
     const mf = mockFetch((nthCall, opts) => {
       seenAuthHeaders.push(opts?.headers ? opts.headers.Authorization : null);
+      seenVersionHeaders.push(opts?.headers ? opts.headers['X-EvoMap-Node-Secret-Version'] : null);
+      try { seenBodies.push(opts?.body ? JSON.parse(opts.body) : null); } catch { seenBodies.push(null); }
       if (nthCall === 1) {
         return responseFromJson({
           status: 200,
-          json: { payload: { status: 'acknowledged', node_secret: VALID_HEX64_Z, your_node_id: 'node_test' } },
+          json: { payload: { status: 'acknowledged', node_secret: VALID_HEX64_Z, node_secret_version: 4, your_node_id: 'node_test' } },
         });
       }
       return responseFromJson({ status: 200, json: { status: 'ok' } });
@@ -284,11 +480,15 @@ test('reAuthenticate: env var does NOT undo a successful rotation during verific
       'hub_rotate',
       'rotated secret must be tagged so the next daemon boot can ignore stale shell env'
     );
+    assert.strictEqual(store.getState('node_secret_version'), '4', 'rotated secret version must be stored');
     assert.strictEqual(
       seenAuthHeaders[1],
       `Bearer ${VALID_HEX64_Z}`,
       `verification heartbeat must use the freshly rotated secret, not the stale env var (got ${seenAuthHeaders[1]})`
     );
+    assert.strictEqual(seenVersionHeaders[1], '4', 'verification heartbeat must carry node secret version header');
+    assert.strictEqual(seenBodies[1].node_secret_version, 4, 'verification heartbeat must carry node secret version body');
+    assert.strictEqual(seenBodies[1].meta.node_secret_version, 4, 'verification heartbeat must carry node secret version meta');
     assert.strictEqual(mgr._suppressEnvSecret, true, 'env var must be suppressed after a successful rotation');
     // And subsequent reads should keep returning the rotated secret, not the env value.
     assert.strictEqual(mgr.nodeSecret, VALID_HEX64_Z, 'subsequent nodeSecret reads must keep returning Z');

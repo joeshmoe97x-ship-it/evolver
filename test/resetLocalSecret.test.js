@@ -2,9 +2,9 @@
 
 // Smoke for the `evolver reset-local-secret` CLI helper. Verifies that
 // running it against a controlled fake $HOME wipes:
-//   - mailbox/state.json node_secret + node_secret_source
-//   - legacy ~/.evomap/node_secret file
-// and prints the unset-A2A_NODE_SECRET hint when the env var is set.
+//   - mailbox/state.json node_secret + node_secret_source + node_secret_version
+//   - legacy ~/.evomap/node_secret and ~/.evomap/node_secret_version files
+// and prints the unset-node-secret-env hint when any secret env var is set.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -31,10 +31,17 @@ function rmrf(p) {
 
 function runCli(home, env = {}) {
   return spawnSync(process.execPath, [INDEX_JS, 'reset-local-secret'], {
-    env: { ...process.env, HOME: home, ...env, A2A_NODE_SECRET: env.A2A_NODE_SECRET },
+    env: { ...process.env, HOME: home, ...env },
     encoding: 'utf8',
     timeout: 20_000,
   });
+}
+
+function deleteNodeSecretEnv(env) {
+  delete env.A2A_NODE_SECRET;
+  delete env.A2A_NODE_SECRET_VERSION;
+  delete env.EVOMAP_NODE_SECRET;
+  delete env.EVOMAP_NODE_SECRET_VERSION;
 }
 
 test('reset-local-secret: clears mailbox state and legacy file', () => {
@@ -45,16 +52,18 @@ test('reset-local-secret: clears mailbox state and legacy file', () => {
         _schema_version: 1,
         node_secret: 'a'.repeat(64),
         node_secret_source: 'hub_rotate',
+        node_secret_version: '3',
         node_id: 'node_test',
       }, null, 2)
     );
     fs.writeFileSync(path.join(evomapDir, 'node_secret'), 'b'.repeat(64));
+    fs.writeFileSync(path.join(evomapDir, 'node_secret_version'), '3');
   });
   try {
-    // Spawn child WITHOUT A2A_NODE_SECRET so the unset-hint branch is not
+    // Spawn child WITHOUT node secret env vars so the unset-hint branch is not
     // taken (separate test below covers that).
     const cleanEnv = { ...process.env, HOME: home };
-    delete cleanEnv.A2A_NODE_SECRET;
+    deleteNodeSecretEnv(cleanEnv);
     const res = spawnSync(process.execPath, [INDEX_JS, 'reset-local-secret'], {
       env: cleanEnv,
       encoding: 'utf8',
@@ -67,18 +76,23 @@ test('reset-local-secret: clears mailbox state and legacy file', () => {
     );
     assert.strictEqual(stateAfter.node_secret, '', 'node_secret must be cleared');
     assert.strictEqual(stateAfter.node_secret_source, '', 'source tag must be cleared');
+    assert.strictEqual(stateAfter.node_secret_version, '', 'node_secret_version must be cleared');
     assert.strictEqual(stateAfter.node_id, 'node_test', 'node_id must NOT be touched');
     assert.ok(
       !fs.existsSync(path.join(home, '.evomap', 'node_secret')),
       'legacy ~/.evomap/node_secret must be deleted'
     );
-    assert.match(res.stdout, /A2A_NODE_SECRET is not set in env/, 'should confirm env is clean');
+    assert.ok(
+      !fs.existsSync(path.join(home, '.evomap', 'node_secret_version')),
+      'legacy ~/.evomap/node_secret_version must be deleted'
+    );
+    assert.match(res.stdout, /Node secret env vars are not set in env/, 'should confirm env is clean');
   } finally {
     rmrf(home);
   }
 });
 
-test('reset-local-secret: warns about A2A_NODE_SECRET still set in shell', () => {
+test('reset-local-secret: warns about node secret env vars still set in shell', () => {
   const home = makeFakeHome(({ mailboxDir }) => {
     fs.writeFileSync(
       path.join(mailboxDir, 'state.json'),
@@ -86,15 +100,27 @@ test('reset-local-secret: warns about A2A_NODE_SECRET still set in shell', () =>
     );
   });
   try {
-    const env = { ...process.env, HOME: home, A2A_NODE_SECRET: 'c'.repeat(64) };
+    const env = {
+      ...process.env,
+      HOME: home,
+      A2A_NODE_SECRET: 'c'.repeat(64),
+      A2A_NODE_SECRET_VERSION: '3',
+      EVOMAP_NODE_SECRET: 'd'.repeat(64),
+      EVOMAP_NODE_SECRET_VERSION: '4',
+    };
     const res = spawnSync(process.execPath, [INDEX_JS, 'reset-local-secret'], {
       env,
       encoding: 'utf8',
       timeout: 20_000,
     });
     assert.strictEqual(res.status, 0, `exit 0, stderr: ${res.stderr}`);
-    assert.match(res.stdout, /A2A_NODE_SECRET is still set/, 'should print stale-env warning');
-    assert.match(res.stdout, /unset A2A_NODE_SECRET/, 'should print unset hint');
+    assert.match(res.stdout, /Node secret env vars are still set/, 'should print stale-env warning');
+    assert.match(res.stdout, /A2A_NODE_SECRET_VERSION/, 'should list version env vars');
+    assert.match(
+      res.stdout,
+      /unset A2A_NODE_SECRET A2A_NODE_SECRET_VERSION EVOMAP_NODE_SECRET EVOMAP_NODE_SECRET_VERSION/,
+      'should print full unset hint'
+    );
   } finally {
     rmrf(home);
   }
@@ -104,7 +130,7 @@ test('reset-local-secret: idempotent on already-empty environment', () => {
   const home = makeFakeHome(() => { /* no files written */ });
   try {
     const cleanEnv = { ...process.env, HOME: home };
-    delete cleanEnv.A2A_NODE_SECRET;
+    deleteNodeSecretEnv(cleanEnv);
     const res = spawnSync(process.execPath, [INDEX_JS, 'reset-local-secret'], {
       env: cleanEnv,
       encoding: 'utf8',

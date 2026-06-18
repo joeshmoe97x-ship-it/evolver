@@ -2715,11 +2715,12 @@ async function main() {
   } else if (command === 'reset-local-secret') {
     // Wipe every local store of node_secret in one shot, so a daemon stuck
     // after a manual web reset (https://evomap.ai/account -> Reset Secret)
-    // can boot clean. Three locations are involved:
-    //   - MailboxStore: ~/.evomap/mailbox/state.json key node_secret
-    //   - Legacy file:  ~/.evomap/node_secret
-    //   - Shell env:    A2A_NODE_SECRET (we cannot mutate the parent shell;
-    //                   we just print the unset hint)
+    // can boot clean. Local stores involved:
+    //   - MailboxStore: ~/.evomap/mailbox/state.json key node_secret + version
+    //   - Legacy files: ~/.evomap/node_secret and ~/.evomap/node_secret_version
+    //   - Shell env:    A2A_NODE_SECRET / EVOMAP_NODE_SECRET and matching
+    //                   version vars (we cannot mutate the parent shell; we
+    //                   just print the unset hint)
     const path = require('path');
     const fs = require('fs');
     // Honor an explicit HOME override (used by tests to redirect to a fake
@@ -2731,12 +2732,13 @@ async function main() {
     const home = process.env.HOME || os.homedir();
     const stateFile = path.join(home, '.evomap', 'mailbox', 'state.json');
     const legacyFile = path.join(home, '.evomap', 'node_secret');
+    const legacyVersionFile = path.join(home, '.evomap', 'node_secret_version');
     let cleared = 0;
     try {
       if (fs.existsSync(stateFile)) {
         const raw = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
         let mutated = false;
-        for (const k of ['node_secret', 'node_secret_source']) {
+        for (const k of ['node_secret', 'node_secret_source', 'node_secret_version']) {
           if (raw[k] !== undefined && raw[k] !== '') {
             raw[k] = '';
             mutated = true;
@@ -2755,17 +2757,28 @@ async function main() {
         cleared += 1;
         console.log('[reset-local-secret] removed legacy file ' + legacyFile);
       }
+      if (fs.existsSync(legacyVersionFile)) {
+        fs.unlinkSync(legacyVersionFile);
+        cleared += 1;
+        console.log('[reset-local-secret] removed legacy file ' + legacyVersionFile);
+      }
     } catch (err) {
       console.error('[reset-local-secret] error:', err && err.message || err);
       process.exit(1);
     }
-    if (process.env.A2A_NODE_SECRET) {
+    const stillSetEnv = [
+      'A2A_NODE_SECRET',
+      'A2A_NODE_SECRET_VERSION',
+      'EVOMAP_NODE_SECRET',
+      'EVOMAP_NODE_SECRET_VERSION',
+    ].filter((key) => process.env[key]);
+    if (stillSetEnv.length > 0) {
       console.log('');
-      console.log('[reset-local-secret] A2A_NODE_SECRET is still set in this shell.');
-      console.log('[reset-local-secret] Run:    unset A2A_NODE_SECRET');
-      console.log('[reset-local-secret] Or edit your shell rc / .env file before restarting the daemon.');
+      console.log('[reset-local-secret] Node secret env vars are still set in this shell: ' + stillSetEnv.join(', '));
+      console.log('[reset-local-secret] Run:    unset A2A_NODE_SECRET A2A_NODE_SECRET_VERSION EVOMAP_NODE_SECRET EVOMAP_NODE_SECRET_VERSION');
+      console.log('[reset-local-secret] Or update secret and version as a matched pair before restarting the daemon.');
     } else {
-      console.log('[reset-local-secret] A2A_NODE_SECRET is not set in env -- good.');
+      console.log('[reset-local-secret] Node secret env vars are not set in env -- good.');
     }
     console.log('[reset-local-secret] ' + cleared + ' location(s) cleared. Restart the daemon to pick a fresh secret from the hub.');
     process.exit(0);

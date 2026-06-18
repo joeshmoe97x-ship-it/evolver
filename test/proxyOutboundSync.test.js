@@ -196,6 +196,48 @@ describe('proxy trace outbound sync', () => {
     }
   });
 
+  it('rejects secret_version-only encrypted proxy_trace payloads before outbound upload by default', async () => {
+    const dataDir = tmpDataDir();
+    const store = new MailboxStore(dataDir);
+    store.setState('node_id', 'node_test_trace_secret_version_reject');
+    const trace = store.send({
+      type: 'proxy_trace',
+      priority: 'low',
+      payload: {
+        schema: 'prism_trace_row.v1',
+        encrypted: true,
+        node_secret_version: 7,
+        trace: {
+          ...encryptedTrace('ZmFrZS1lbmNyeXB0ZWQ='),
+          secret_version: 7,
+        },
+      },
+    });
+
+    hubFetchMod._setFetchImplForTest(async () => {
+      throw new Error('secret_version-only proxy_trace should not be sent');
+    });
+
+    try {
+      const sync = new OutboundSync({
+        store,
+        hubUrl: 'https://hub.example.test',
+        getHeaders: () => ({ Authorization: 'Bearer test' }),
+        logger: { error: () => {}, warn: () => {}, log: () => {} },
+      });
+
+      const result = await sync.flush();
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.dropped, 1);
+      assert.equal(store.getById(trace.message_id).status, 'rejected');
+      assert.equal(store.getById(trace.message_id).error, 'proxy trace payload rejected');
+    } finally {
+      store.close();
+      try { fs.rmSync(dataDir, { recursive: true }); } catch {}
+    }
+  });
+
   it('rejects encrypted proxy_trace payloads with plaintext outside the envelope', async () => {
     const dataDir = tmpDataDir();
     const store = new MailboxStore(dataDir);
