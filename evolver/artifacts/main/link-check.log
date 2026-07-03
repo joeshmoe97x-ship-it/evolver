@@ -1,14 +1,20 @@
 === provenance ===
 Repo:       joeshmoe97x-ship-it/evolver
 Branch:     main
-Commit:     7d9749d3fe87fd9e1fc1f093d812e2741f16ba47
+Commit:     7b1bd483e80982b3c595ed86d18855d067ca585e
 Trigger:    push
-Timestamp:  2026-07-03T06:31:32+00:00
+Timestamp:  2026-07-03T07:06:57+00:00
 
 === Step 1: actions/setup-node@v4 (resolved Node) ===
 v22.23.1
 
-=== Step 2: npm run check-links ===
+=== Step 2: npm run check-bedrock-prefix ===
+
+> @evomap/evolver@1.89.20 check-bedrock-prefix
+> if grep -nF '(global|us|eu|ap)' scripts/bedrock-alias-watch.sh | grep -vE '^[0-9]+:[[:space:]]*#'; then echo 'FAIL: hardcoded (global|us|eu|ap) literal found in a non-comment context in scripts/bedrock-alias-watch.sh. Use PREFIX_REGEX (driven by BEDROCK_REGIONAL_PREFIXES) instead.' && exit 1; else exit 0; fi
+
+
+=== Step 3: npm run check-links ===
 
 > @evomap/evolver@1.89.20 check-links
 > node scripts/check-readme-links.js
