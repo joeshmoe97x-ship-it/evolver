@@ -1,0 +1,29 @@
+<!--
+  Sample fixture for `make watch`. Mirrors the shape of the AWS Bedrock
+  "Supported foundation models" doc page so evolver/scripts/bedrock-alias-watch.sh
+  can diff it the same way it would diff the real page.
+
+  Edit this file in real time during a `make watch` session to simulate
+  new model IDs being added, dated revisions appearing, or models being
+  retired. The watch loop re-runs every WATCH_INTERVAL seconds (default 60)
+  and prints the Slack payload to your terminal.
+
+  The watch script only looks at <li>...</li> entries (plus <code>,
+  <pre>, and inline text) containing the substring `anthropic.claude-`.
+  Other entries (e.g. meta.llama3) are ignored.
+
+  To start fresh, run `make watch-fresh` (clears dev-fixtures/state/).
+-->
+<html>
+  <body>
+    <h1>Supported foundation models in Amazon Bedrock</h1>
+    <ul>
+      <li>global.anthropic.claude-opus-4-7</li>
+      <li>us.anthropic.claude-opus-4-7-20251001-v1:0</li>
+      <li>global.anthropic.claude-haiku-4-5-20251001-v1:0</li>
+      <li>global.anthropic.claude-sonnet-4-6</li>
+      <li>global.anthropic.claude-sonnet-4-7</li>
+      <li>meta.llama3-70b-instruct-v1:0</li>
+    </ul>
+  </body>
+</html>

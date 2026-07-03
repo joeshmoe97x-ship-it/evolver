@@ -1,0 +1,7 @@
+# Runtime artifacts created by `make watch`. The seeded fixtures
+# (aws.html, messages_route.js, README.md) ARE committed; only the
+# things the watch loop produces at runtime are ignored.
+state/
+.receiver.port
+.receiver.pid
+receiver.log
