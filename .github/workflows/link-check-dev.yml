@@ -15,14 +15,13 @@ name: link-check-dev
 # Per-branch capture:
 #   Each run writes to `evolver/artifacts/<branch>/dev-check.log`
 #   in the runner workspace AND publishes it as a GH-Actions
-#   artifact named `link-check-dev-<branch>`. A best-effort
-#   `git push` to the PR's source branch follows; the push is
-#   non-fatal — the upload-artifact (above) is the durable
-#   record either way. (GITHUB_TOKEN on `pull_request` events is
-#   read-only by default, so the push is expected to be denied
-#   unless the workflow is later switched to `pull_request_target`,
-#   which carries a known security trade-off documented in
-#   link-check.yml's top comment.)
+#   artifact named `link-check-dev-<branch>`. The auto-commit
+#   step below is GUARDED to `github.event_name == 'push'` so on
+#   this PR-only workflow it is skipped on every run (saves ~10s
+#   of dead work per PR run; the upload-artifact above is the
+#   durable per-PR record). If the trigger set is later widened
+#   to include `push` events, the auto-commit step will fire and
+#   persist the captured log back to the PR source branch.
 
 # Cancel superseded runs on the same ref so a PR with rapid pushes
 # to the same branch only spends CI minutes on the most-recent commit.
@@ -103,14 +102,13 @@ jobs:
           path: evolver/artifacts/${{ steps.branch-dir.outputs.BRANCH_DIR }}/dev-check.log
           if-no-files-found: warn
 
-      # Auto-commit-back to the PR source branch as a best-effort.
-      # This step will fail with auth-denied on default `pull_request`
-      # events because GITHUB_TOKEN is read-only; the failure is
-      # caught by `continue-on-error: true` so the rest of the job
-      # continues normally. The uploaded artifact (above) is the
-      # durable per-PR record regardless.
-      - name: Auto-commit capture to PR source branch (best-effort)
-        continue-on-error: true
+      # Auto-commit-back to the PR source branch. GUARDED to push
+      # events so this step is SKIPPED on every run of this
+      # PR-only workflow (saves ~10s of auth-denied dead work per
+      # PR). The uploaded artifact above is the durable per-PR
+      # record. "No commit on PRs" intent is now explicit in YAML.
+      - name: Auto-commit capture to PR source branch
+        if: github.event_name == 'push'
         run: |
           set -uo pipefail
           git config user.name "github-actions[bot]"
