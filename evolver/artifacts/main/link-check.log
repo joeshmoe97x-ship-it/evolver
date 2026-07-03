@@ -1,0 +1,16 @@
+=== provenance ===
+Repo:       joeshmoe97x-ship-it/evolver
+Branch:     main
+Commit:     aea782a49f356fcf7911d312631d553dab5cb22e
+Trigger:    push
+Timestamp:  2026-07-03T05:34:43+00:00
+
+=== Step 1: actions/setup-node@v4 (resolved Node) ===
+v22.23.1
+
+=== Step 2: npm run check-links ===
+
+> @evomap/evolver@1.89.20 check-links
+> node scripts/check-readme-links.js
+
+PASS: 21 cross-link(s) across 6 README file(s) resolve correctly.
