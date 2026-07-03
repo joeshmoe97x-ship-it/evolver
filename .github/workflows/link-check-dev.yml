@@ -16,11 +16,11 @@ name: link-check-dev
 #   Each run writes to `evolver/artifacts/<branch>/dev-check.log`
 #   in the runner workspace AND publishes it as a GH-Actions
 #   artifact named `link-check-dev-<branch>`. The auto-commit
-#   step below is GUARDED to `github.event_name == 'push'` so on
-#   this PR-only workflow it is skipped on every run (saves ~10s
-#   of dead work per PR run; the upload-artifact above is the
-#   durable per-PR record). If the trigger set is later widened
-#   to include `push` events, the auto-commit step will fire and
+#   step below is GUARDED to push events, so on this PR-only
+#   workflow it is skipped on every run (saves ~10s of dead
+#   work per PR run; the upload-artifact above is the durable
+#   per-PR record). If the trigger set is later widened to
+#   include `push` events, the auto-commit step will fire and
 #   persist the captured log back to the PR source branch.
 
 # Cancel superseded runs on the same ref so a PR with rapid pushes
@@ -102,11 +102,11 @@ jobs:
           path: evolver/artifacts/${{ steps.branch-dir.outputs.BRANCH_DIR }}/dev-check.log
           if-no-files-found: warn
 
-      # Auto-commit-back to the PR source branch. GUARDED to push
-      # events so this step is SKIPPED on every run of this
-      # PR-only workflow (saves ~10s of auth-denied dead work per
-      # PR). The uploaded artifact above is the durable per-PR
-      # record. "No commit on PRs" intent is now explicit in YAML.
+      # Auto-commit-back to the PR source branch. The if-guard
+      # (`if: github.event_name == 'push'`) makes GH-Actions skip
+      # this step entirely on PR events — the auto-commit body
+      # never runs on this workflow. ("No commit on PRs" intent
+      # is now explicit in YAML.)
       - name: Auto-commit capture to PR source branch
         if: github.event_name == 'push'
         run: |
