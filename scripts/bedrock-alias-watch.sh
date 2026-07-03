@@ -190,7 +190,7 @@ while IFS= read -r aws_id; do
   # Skip if the full ID is already known
   grep -qx "$aws_id" "$KNOWN_FULL_FILE" && continue
   # Skip if the family/major/minor isn't in the table (handled by 4a)
-  canon="$(printf '%s' "$aws_id" | sed -E 's/^(global|us|eu|ap)\.anthropic\.claude-([a-z]+)-([0-9]+)-([0-9]+).*/\2\/\3\/\4/')"
+  canon="$(printf '%s' "$aws_id" | sed -E "s/^${PREFIX_REGEX}\.anthropic\.claude-([a-z]+)-([0-9]+)-([0-9]+).*/\2\/\3\/\4/")"
   grep -qx "$canon" "$KNOWN_KEYS_FILE" || continue
   # Find the table's full ID for this family
   known_full="$(grep -E "^${canon}[|]" "$KNOWN_MAP_FILE" | head -1 | cut -d'|' -f2-)"
