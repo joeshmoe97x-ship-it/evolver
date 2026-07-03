@@ -1,0 +1,130 @@
+name: link-check-dev
+
+# Slim, exit-tolerant sister of the strict `link-check` workflow.
+#
+# Why a separate file:
+#   - Triggers ONLY on PRs whose changeset touches `scripts/**`
+#     (path filter). Never runs on push-to-main; never blocks a
+#     PR's required status checks.
+#   - Job-level `continue-on-error: true` so a soft-fail shows up
+#     in the PR's check status but does NOT prevent merge.
+#   - Same 6-file scope as the strict check (`npm run check-links`
+#     unchanged). The "slim" axis is the trigger filter + fast-
+#     feedback outcome, not a shrunk scope.
+#
+# Per-branch capture:
+#   Each run writes to `evolver/artifacts/<branch>/dev-check.log`
+#   in the runner workspace AND publishes it as a GH-Actions
+#   artifact named `link-check-dev-<branch>`. A best-effort
+#   `git push` to the PR's source branch follows; the push is
+#   non-fatal — the upload-artifact (above) is the durable
+#   record either way. (GITHUB_TOKEN on `pull_request` events is
+#   read-only by default, so the push is expected to be denied
+#   unless the workflow is later switched to `pull_request_target`,
+#   which carries a known security trade-off documented in
+#   link-check.yml's top comment.)
+
+# Cancel superseded runs on the same ref so a PR with rapid pushes
+# to the same branch only spends CI minutes on the most-recent commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+
+# contents:read is sufficient for writing into the runner workspace;
+# the conditional `git push` below is best-effort and never blocks.
+permissions:
+  contents: read
+
+jobs:
+  link-check-dev:
+    name: dev-only link-check on scripts/** change
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same defensive sanitization as the strict workflow: strip any
+      # [a-zA-Z0-9._/-] characters from the head_ref so a crafted
+      # branch name can't escape the evolver/artifacts/ namespace.
+      - name: Compute sanitized branch directory
+        id: branch-dir
+        env:
+          BRANCH_REF_RAW: ${{ github.head_ref }}
+        run: |
+          # `tr -cd 'a-zA-Z0-9._/-'` strips everything outside the
+          # GH-allowed branch-name charset. GH itself rejects empty /
+          # `.`-prefixed / `..` branch names, so this regex always
+          # produces a non-empty result for any valid ref — the
+          # `[ -n ... ]` guard below is purely defensive.
+          BRANCH_DIR=$(printf '%s' "$BRANCH_REF_RAW" | tr -cd 'a-zA-Z0-9._/-')
+          [ -n "$BRANCH_DIR" ] || { echo "branch-ref sanitize produced empty"; exit 1; }
+          echo "BRANCH_DIR=$BRANCH_DIR" >> "$GITHUB_OUTPUT"
+          echo "sanitized '$BRANCH_REF_RAW' -> '$BRANCH_DIR'"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # `set -uo pipefail` WITHOUT `-e`: the JOB-level
+      # `continue-on-error: true` catches any non-zero here and lets
+      # subsequent steps run; we want a durable capture regardless of
+      # the link-check verdict.
+      - name: Capture verdict + write per-branch dev-only log
+        env:
+          BRANCH_DIR: ${{ steps.branch-dir.outputs.BRANCH_DIR }}
+        run: |
+          set -uo pipefail
+          mkdir -p "evolver/artifacts/$BRANCH_DIR"
+          {
+            echo '=== provenance ==='
+            echo "Repo:       ${{ github.repository }}"
+            echo "Branch:     ${{ github.head_ref }}"
+            echo "Commit:     ${{ github.sha }}"
+            echo "Trigger:    ${{ github.event_name }} (dev-only, exit-tolerant)"
+            echo "Timestamp:  $(date -Iseconds)"
+            echo ''
+            echo '=== Step 1: actions/setup-node@v4 (resolved Node) ==='
+            node --version
+            echo ''
+            echo '=== Step 2: npm run check-links (dev-only) ==='
+            npm run check-links
+          } > "evolver/artifacts/$BRANCH_DIR/dev-check.log" 2>&1
+
+      - name: Upload dev-only artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: link-check-dev-${{ steps.branch-dir.outputs.BRANCH_DIR }}
+          path: evolver/artifacts/${{ steps.branch-dir.outputs.BRANCH_DIR }}/dev-check.log
+          if-no-files-found: warn
+
+      # Auto-commit-back to the PR source branch as a best-effort.
+      # This step will fail with auth-denied on default `pull_request`
+      # events because GITHUB_TOKEN is read-only; the failure is
+      # caught by `continue-on-error: true` so the rest of the job
+      # continues normally. The uploaded artifact (above) is the
+      # durable per-PR record regardless.
+      - name: Auto-commit capture to PR source branch (best-effort)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "evolver/artifacts/${{ steps.branch-dir.outputs.BRANCH_DIR }}/dev-check.log" || true
+          if git diff --cached --quiet; then
+            echo 'no changes to commit — capture identical to existing'
+            exit 0
+          fi
+          git commit \
+            -m "ci: capture dev-only link-check log for ${{ steps.branch-dir.outputs.BRANCH_DIR }}@${{ github.sha }} [skip ci]" \
+            || echo 'commit-failed-skipped'
+          git push \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            "HEAD:${{ steps.branch-dir.outputs.BRANCH_DIR }}" \
+            2>&1 | tail -5 \
+            || echo 'push-skipped (likely read-only token on this event type)'

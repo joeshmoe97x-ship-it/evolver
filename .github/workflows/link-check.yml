@@ -3,10 +3,27 @@ name: link-check
 # Dedicated workflow so the README status badge
 # (https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)
 # reflects ONLY the cross-link audit verdict, not the entire CI suite.
-# The ci.yml workflow also runs `npm run check-links`; this file duplicates
-# the check so the badge stays accurate even if ci.yml is restructured
-# later, and so the gate on cross-link health (PRs blocked on broken refs)
-# remains even if the broader ci.yml workflow is split or trimmed.
+#
+# Per-branch captures (this round):
+#   Every run writes a log to `evolver/artifacts/<branch>/link-check.log`
+#   in the runner workspace AND publishes it as a GH-Actions artifact
+#   named `link-check-<branch>`. For push-to-main runs, the log is
+#   also auto-committed to `evolver/artifacts/main/link-check.log` so
+#   the canonical green/red verdict at HEAD is durable across sessions.
+#   Pull-request runs default to upload-artifact only; the GITHUB_TOKEN
+#   on `pull_request` events is read-only, so the same auto-commit
+#   step is GUARDED to `github.event_name == 'push'` to avoid hitting
+#   the auth boundary every PR.
+#
+# Why not `pull_request_target` for commit-back on PR events: that
+# event type runs any checkout-and-run-our-script step against the
+# PR's tree with full token scope, which is a documented footgun for
+# workflows that execute PR-contributed code. Our workflow only
+# runs `node scripts/check-readme-links.js` (a markdown parser) but
+# the trade-off is real for future scripts/ additions. The current
+# design (read-only on PR + GH-artifact durable + write to main on
+# push) keeps the badge accurate on the README without expanding
+# the security surface.
 
 # Cancel superseded runs on the same ref so a rapid series of pushes to
 # the same PR only spends CI minutes on the most-recent commit.
@@ -20,8 +37,13 @@ on:
   pull_request:
     branches: [main]
 
+# Bumped from `contents: read` to `contents: write` because the
+# workflow now auto-commits captured logs back to the
+# `evolver/artifacts/main/` subdir on push-to-main runs. The bump
+# is scoped to this workflow file only; `link-check-dev.yml` keeps
+# `contents: read` because its best-effort commit-back is non-fatal.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   link-check:
@@ -29,7 +51,87 @@ jobs:
     timeout-minutes: 1
     steps:
       - uses: actions/checkout@v4
+
+      # Compute a sanitized branch-directory name once, then reuse for
+      # capture, upload, and (when applicable) auto-commit. Strips any
+      # character outside [a-zA-Z0-9._/-] from the branch ref so a
+      # crafted branch name can't escape the `evolver/artifacts/`
+      # namespace. GitHub itself rejects branch names starting with
+      # `.` or `..` — this is belt-and-suspenders defense-in-depth.
+      - name: Compute sanitized branch directory
+        id: branch-dir
+        env:
+          BRANCH_REF_RAW: ${{ github.head_ref || github.ref_name }}
+        run: |
+          # `tr -cd 'a-zA-Z0-9._/-'` strips everything outside the
+          # GH-allowed branch-name charset. GH itself rejects empty /
+          # `.`-prefixed / `..` branch names, so this regex always
+          # produces a non-empty result for any valid ref — the
+          # `[ -n ... ]` guard below is purely defensive.
+          BRANCH_DIR=$(printf '%s' "$BRANCH_REF_RAW" | tr -cd 'a-zA-Z0-9._/-')
+          [ -n "$BRANCH_DIR" ] || { echo "branch-ref sanitize produced empty"; exit 1; }
+          echo "BRANCH_DIR=$BRANCH_DIR" >> "$GITHUB_OUTPUT"
+          echo "sanitized '$BRANCH_REF_RAW' -> '$BRANCH_DIR'"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm run check-links
+
+      # `set -uo pipefail` WITHOUT `-e`: even when the link-check exits
+      # 1 (broken refs), the capture file is still written to the
+      # runner workspace. The next step (`Upload per-branch artifact`)
+      # has `if: always()` so it runs even when this step fails, giving
+      # reviewers a durable per-PR capture via the GH-artifact download.
+      # The non-zero npm exit propagates up to the workflow as a fail —
+      # which is what we WANT here (red badge on broken refs).
+      - name: Capture verdict + write per-branch log
+        env:
+          BRANCH_DIR: ${{ steps.branch-dir.outputs.BRANCH_DIR }}
+        run: |
+          set -uo pipefail
+          mkdir -p "evolver/artifacts/$BRANCH_DIR"
+          {
+            echo '=== provenance ==='
+            echo "Repo:       ${{ github.repository }}"
+            echo "Branch:     ${{ github.head_ref || github.ref_name }}"
+            echo "Commit:     ${{ github.sha }}"
+            echo "Trigger:    ${{ github.event_name }}"
+            echo "Timestamp:  $(date -Iseconds)"
+            echo ''
+            echo '=== Step 1: actions/setup-node@v4 (resolved Node) ==='
+            node --version
+            echo ''
+            echo '=== Step 2: npm run check-links ==='
+            npm run check-links
+          } > "evolver/artifacts/$BRANCH_DIR/link-check.log" 2>&1
+
+      # `if: always()` so RED-badge runs still produce a downloadable
+      # artifact. Without this guard, a broken-ref capture would never
+      # reach reviewers through the GH-artifact UI — they'd have to
+      # dig through the build log instead.
+      - name: Upload per-branch artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: link-check-${{ steps.branch-dir.outputs.BRANCH_DIR }}
+          path: evolver/artifacts/${{ steps.branch-dir.outputs.BRANCH_DIR }}/link-check.log
+          if-no-files-found: warn
+
+      # Auto-commit-back to main ONLY on push-to-main. RED push-to-main
+      # events also skip (default sequential behavior — failed capture
+      # means auto-commit doesn't run, so a RED log never auto-grows
+      # main; the [skip ci] tag in the commit message prevents
+      # re-triggering on the auto-commit's SHA).
+      - name: Auto-commit capture to main (push-to-main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "evolver/artifacts/main/link-check.log" || true
+          if git diff --cached --quiet; then
+            echo 'no changes to commit — capture identical to existing'
+            exit 0
+          fi
+          git commit -m "ci: capture link-check log for ${{ github.sha }} [skip ci]"
+          git push origin main
