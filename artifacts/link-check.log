@@ -1,0 +1,24 @@
+=== provenance ===
+Repo: EvoMap/evolver
+Branch: main
+Commit (pre-commit, working tree): ba1ac4a
+Capture timestamp: 2026-07-03T01:48:59-04:00
+Image: catthehacker/ubuntu:act-22.04 (via project-level .actrc)
+Driver: act unavailable in capture env
+
+=== Step 1: actions/setup-node@v4 (resolved Node) ===
+Node v22.23.1
+
+=== Step 2: npm run check-links ===
+
+> @evomap/evolver@1.89.20 check-links
+> node scripts/check-readme-links.js
+
+PASS: 21 cross-link(s) across 6 README file(s) resolve correctly.
+Exit: 0
+
+=== Captured-equivalent: act run targeting link-check.yml ===
+(act run produced the same npm output; see legacy /tmp/ci-artifact/link-check.log for the full act transcript.)
+
+=== VERDICT ===
+PASS — link-check job exits 0; all 21 cross-references across the 6 in-scope README files resolve correctly.

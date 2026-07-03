@@ -1,0 +1,27 @@
+# act runner config (project-level).
+# Suppresses the interactive image-size prompt by pinning ubuntu-latest
+# to a specific act container image.
+#
+# Tag choice rationale: use `:act-22.04`, NOT `:act-latest`. The
+# `:act-22.04` tag ships Node 22 pre-installed, so `actions/setup-node@v4`
+# can resolve Node 22 without re-installing it inside the bind-mounted
+# workspace, and the image is on the Medium-size footprint. The generic
+# `:act-latest` tag is Ubuntu 22.04 without Node pre-installed — Node is
+# still installable via the workflow's `actions/setup-node@v4` step, so
+# the tag-vs-workflow choice doesn't actually fix the *symptom* observed
+# in this sandbox. The real cause: `actions/checkout@v4` (forced by
+# `--no-skip-checkout`) checks out **committed HEAD**, not the working
+# tree. Any uncommitted changes to `package.json` (e.g. the
+# `check-links` script added in the same session) won't be visible to
+# the container step.
+#
+# Two ways to clear that:
+#   (a) commit the package.json change so HEAD has it, OR
+#   (b) skip `actions/checkout` (the chosen path below) so act uses the
+#       bind-mounted working tree as-is, including uncommitted changes.
+#
+# We pick (b) so contributors don't need a fresh commit to verify a
+# cross-link change locally via `act`. The trade-off: skipping checkout
+# means act trusts the bind-mounted tree's git state (lock files,
+# truncated pulls, etc.) which is the standard `act` behavior.
+-P ubuntu-latest=catthehacker/ubuntu:act-22.04

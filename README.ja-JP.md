@@ -5,6 +5,7 @@
 [![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-green.svg)](https://nodejs.org/)
 [![npm downloads](https://img.shields.io/npm/dm/@evomap/evolver.svg)](https://www.npmjs.com/package/@evomap/evolver)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.15097-b31b1b.svg)](https://arxiv.org/abs/2604.15097)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
 
 ![Evolver Cover](assets/cover.png)
 
@@ -115,9 +116,25 @@ npm install
 
 Evolver が OpenClaw セッション内で実行されると、ホストが stdout のディレクティブ（`sessions_spawn(...)` など）を拾い、後続のアクションを自動で連鎖させます。
 
+### EvoMap ネットワークへの接続（任意）
+
+[EvoMap ネットワーク](https://evomap.ai)に接続するには、**`evolver` を実行するカレントディレクトリ**（ホームディレクトリでも、グローバル npm インストール先でもありません）に `.env` ファイルを作成します。Evolver は実行のたびに `process.cwd()` から `.env` を読み込むので、プロジェクトごとに別々の `.env` を置くこともできます:
+
+```bash
+# Node ID を取得するには https://evomap.ai で登録してください
+A2A_HUB_URL=https://evomap.ai
+A2A_NODE_ID=your_node_id_here
+```
+
+> **注記**: Evolver は `.env` なしで完全にオフラインで動作します。Hub 接続は、スキル共有、ワーカープール、進化リーダーボードなどのネットワーク機能にのみ必要です。
+
+## 開発者ワークフロー
+
+`npm install -g @evomap/evolver` でインストール済みの方は、このセクション全体をスキップしてください ―― 本 README の残りはパブリッシュ済み CLI のユーザー向けです。本セクション以下のサブセクションは貢献者向けです：ソースからのエンジン実行、`scripts/` の反復開発、PR の送付。今後追加する貢献者向けコンテンツは、独立した `## ` セクションではなく、本セクション下の `### ` 子セクションとして配置してください ―― ユーザー向けと貢献者向けの分離をクリーンに保つためです。
+
 ### ソースから実行（貢献者向け）
 
-すでに `npm install -g @evomap/evolver` を済ませた方はこのセクションを完全にスキップしてください。ソース実行パスはエンジン本体を触る貢献者のみを対象としています。
+ソース実行パスはエンジン本体を触る貢献者のみを対象としています。
 
 ```bash
 git clone https://github.com/EvoMap/evolver.git
@@ -130,17 +147,21 @@ node index.js --review   # evolver --review と等価
 node index.js --loop     # evolver --loop と等価
 ```
 
-### EvoMap ネットワークへの接続（任意）
+### ローカル開発: `make watch`
 
-[EvoMap ネットワーク](https://evomap.ai)に接続するには、**`evolver` を実行するカレントディレクトリ**（ホームディレクトリでも、グローバル npm インストール先でもありません）に `.env` ファイルを作成します。Evolver は実行のたびに `process.cwd()` から `.env` を読み込むので、プロジェクトごとに別々の `.env` を置くこともできます:
+ローカルでシミュレートされた AWS Bedrock の更新に対して `scripts/bedrock-alias-watch.sh` を反復開発したい場合 ―― 例えば `src/proxy/router/messages_route.js` の `KNOWN_BEDROCK_ALIASES` に新しい Anthropic モデルを追加する、あるいは監視スクリプトが日付リビジョンやリタイアメント イベントをどう検出するかを試す ―― は `make watch` をお使いください:
 
 ```bash
-# Node ID を取得するには https://evomap.ai で登録してください
-A2A_HUB_URL=https://evomap.ai
-A2A_NODE_ID=your_node_id_here
+make watch               # 60 秒ループ、dev-fixtures/aws.html を編集
+WATCH_INTERVAL=10 make watch   # より高速なループ
+make watch-fresh         # まず state/ をクリア
+make watch-once          # 1 回だけ実行、ループなし
+make watch-tail          # 別のウィンドウで receiver.log を tail
 ```
 
-> **注記**: Evolver は `.env` なしで完全にオフラインで動作します。Hub 接続は、スキル共有、ワーカープール、進化リーダーボードなどのネットワーク機能にのみ必要です。
+この監視スクリプトはローカルの Slack レシーバ (`http://127.0.0.1:<ランダムポート>/slack` をリッスン) に送信するため、`dev-fixtures/aws.html` を編集すると、ターミナルに実際の Slack ペイロードが直接流れ込みます。クリーンな状態から始めるには、`make watch-fresh` を実行する (`dev-fixtures/state/` をクリア) か、そのディレクトリを直接削除してください: `rm -rf dev-fixtures/state`。
+
+「別のウィンドウで `make watch-tail` を実行する」設計の根拠、および fixture ファイルのうち .gitignore 対象とコミット対象の一覧については、[`dev-fixtures/README.md`](dev-fixtures/README.md) を参照してください。
 
 ## クイックスタート
 

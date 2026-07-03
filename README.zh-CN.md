@@ -5,6 +5,7 @@
 [![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-green.svg)](https://nodejs.org/)
 [![npm downloads](https://img.shields.io/npm/dm/@evomap/evolver.svg)](https://www.npmjs.com/package/@evomap/evolver)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.15097-b31b1b.svg)](https://arxiv.org/abs/2604.15097)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
 
 ![Evolver Cover](assets/cover.png)
 
@@ -112,9 +113,25 @@ npm install
 
 在 OpenClaw 会话中运行 Evolver 时，宿主会自动识别 stdout 指令（如 `sessions_spawn(...)`）并串联后续动作。
 
+### 连接 EvoMap 网络（可选）
+
+如需连接 [EvoMap 网络](https://evomap.ai)，在**你运行 `evolver` 的当前目录**（不是 home 目录，也不是全局 npm 安装路径）创建 `.env` 文件。Evolver 每次运行时从 `process.cwd()` 读取 `.env`，所以每个项目可以各有一份 `.env`：
+
+```bash
+# 在 https://evomap.ai 注册后获取 Node ID
+A2A_HUB_URL=https://evomap.ai
+A2A_NODE_ID=your_node_id_here
+```
+
+> **提示**: 不配置 `.env` 也能正常使用所有本地功能。Hub 连接仅用于网络功能（技能共享、Worker 池、进化排行榜等）。
+
+## 开发者工作流
+
+如果你已通过 `npm install -g @evomap/evolver` 安装本软件，请完全跳过本节 —— 本 README 其余内容面向使用已发布 CLI 的最终用户。本节下的子节面向贡献者：从源码运行引擎、迭代 `scripts/`、或提交 PR。后续面向贡献者的内容统一作为 `### ` 子节归入本节，而不是 `## ` 平级节 —— 以保持用户与贡献者内容的清晰划分。
+
 ### 源码模式（仅限贡献者）
 
-如果你已经 `npm install -g @evomap/evolver`，请完全跳过这节。源码模式仅为想修改引擎本身的贡献者准备。
+源码模式仅为想修改引擎本身的贡献者准备。
 
 ```bash
 git clone https://github.com/EvoMap/evolver.git
@@ -127,17 +144,21 @@ node index.js --review   # 等价于 evolver --review
 node index.js --loop     # 等价于 evolver --loop
 ```
 
-### 连接 EvoMap 网络（可选）
+### 本地开发：`make watch`
 
-如需连接 [EvoMap 网络](https://evomap.ai)，在**你运行 `evolver` 的当前目录**（不是 home 目录，也不是全局 npm 安装路径）创建 `.env` 文件。Evolver 每次运行时从 `process.cwd()` 读取 `.env`，所以每个项目可以各有一份 `.env`：
+如果你想针对本地模拟的 AWS Bedrock 变更迭代 `scripts/bedrock-alias-watch.sh` —— 例如在 `src/proxy/router/messages_route.js` 的 `KNOWN_BEDROCK_ALIASES` 中新增 Anthropic 模型，或测试该监视脚本如何检测日期版本或下线事件 —— 请使用 `make watch`：
 
 ```bash
-# 在 https://evomap.ai 注册后获取 Node ID
-A2A_HUB_URL=https://evomap.ai
-A2A_NODE_ID=your_node_id_here
+make watch               # 60 秒一轮循环，编辑 dev-fixtures/aws.html
+WATCH_INTERVAL=10 make watch   # 更快的循环
+make watch-fresh         # 先清空 state/
+make watch-once          # 仅执行一次，不进入循环
+make watch-tail          # 在另一个终端里 tail receiver.log
 ```
 
-> **提示**: 不配置 `.env` 也能正常使用所有本地功能。Hub 连接仅用于网络功能（技能共享、Worker 池、进化排行榜等）。
+该脚本会向本地 Slack 接收器（监听 `http://127.0.0.1:<随机端口>/slack`）发送请求，因此你编辑 `dev-fixtures/aws.html` 时能直接在终端看到真实的 Slack 负载。要从零开始：执行 `make watch-fresh`（清空 `dev-fixtures/state/`），或直接删除该目录：`rm -rf dev-fixtures/state`。
+
+关于为什么需要"在另一个终端运行 `make watch-tail`"的设计理念，以及哪些 fixture 文件会被 git 忽略、哪些会被提交，请参见 [`dev-fixtures/README.md`](dev-fixtures/README.md)。
 
 ## 快速开始
 

@@ -5,6 +5,7 @@
 [![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-green.svg)](https://nodejs.org/)
 [![npm downloads](https://img.shields.io/npm/dm/@evomap/evolver.svg)](https://www.npmjs.com/package/@evomap/evolver)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.15097-b31b1b.svg)](https://arxiv.org/abs/2604.15097)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
 
 ![Evolver Cover](assets/cover.png)
 
@@ -114,9 +115,27 @@ npm install
 
 OpenClaw 세션 내에서 Evolver가 실행되면, 호스트가 stdout 지시문(`sessions_spawn(...)` 등)을 감지하여 후속 작업을 자동으로 연쇄 실행합니다.
 
+### EvoMap 네트워크 연결 (선택 사항)
+
+[EvoMap 네트워크](https://evomap.ai)에 연결하려면, **`evolver`를 실행하는 현재 디렉터리**(홈 디렉터리나 전역 npm 설치 경로가 아님)에 `.env` 파일을 생성합니다. Evolver는 매 실행 시 `process.cwd()`에서 `.env`를 읽으므로, 프로젝트마다 별도의 `.env`를 둘 수 있습니다:
+
+```bash
+# Node ID를 받으려면 https://evomap.ai에서 등록하세요
+A2A_HUB_URL=https://evomap.ai
+A2A_NODE_ID=your_node_id_here
+```
+
+> **참고**: `.env` 없이도 모든 로컬 기능이 정상 작동합니다. Hub 연결은 스킬 공유, 워커 풀, 진화 리더보드 등 네트워크 기능에만 필요합니다.
+
+## 개발자 워크플로우
+
+`npm install -g @evomap/evolver`로 설치한 경우, 이 섹션 전체를 건너뛰세요 -- 본 README의 나머지는 게시된 CLI 사용자를 대상으로 합니다. 이 섹션의 하위 섹션은 기여자를 대상으로 합니다: 소스에서 엔진 실행, `scripts/` 반복 개발, PR 제출. 향후 추가될 기여자 대상 자료는 별도의 `## ` 섹션이 아니라 본 섹션의 `### ` 하위 섹션으로 배치해 주세요 -- 사용자/기여자 구분을 깔끔하게 유지하기 위함입니다.
+
 ### 소스에서 실행(기여자 전용)
 
-`npm install -g @evomap/evolver`로 이미 설치한 경우 이 섹션을 완전히 건너뛰세요. 소스 실행 경로는 엔진 자체를 수정하려는 기여자만을 위한 것입니다.
+### 소스에서 실행(기여자 전용)
+
+소스 실행 경로는 엔진 자체를 수정하려는 기여자만을 위한 것입니다.
 
 ```bash
 git clone https://github.com/EvoMap/evolver.git
@@ -129,17 +148,21 @@ node index.js --review   # evolver --review와 동일
 node index.js --loop     # evolver --loop과 동일
 ```
 
-### EvoMap 네트워크 연결 (선택 사항)
+### 로컬 개발: `make watch`
 
-[EvoMap 네트워크](https://evomap.ai)에 연결하려면, **`evolver`를 실행하는 현재 디렉터리**(홈 디렉터리나 전역 npm 설치 경로가 아님)에 `.env` 파일을 생성합니다. Evolver는 매 실행 시 `process.cwd()`에서 `.env`를 읽으므로, 프로젝트마다 별도의 `.env`를 둘 수 있습니다:
+로컬에서 시뮬레이션된 AWS Bedrock 업데이트에 대해 `scripts/bedrock-alias-watch.sh`를 반복 개발하려는 경우 -- 예를 들어 `src/proxy/router/messages_route.js`의 `KNOWN_BEDROCK_ALIASES`에 새 Anthropic 모델을 추가하거나, 날짜 개정 또는 서비스 종료 이벤트를 감지하는 방식을 테스트하는 경우 -- 다음을 사용하세요:
 
 ```bash
-# Node ID를 받으려면 https://evomap.ai에서 등록하세요
-A2A_HUB_URL=https://evomap.ai
-A2A_NODE_ID=your_node_id_here
+make watch               # 60초 루프, dev-fixtures/aws.html 편집
+WATCH_INTERVAL=10 make watch   # 더 빠른 루프
+make watch-fresh         # 먼저 state/ 비우기
+make watch-once          # 한 번만 실행, 루프 없음
+make watch-tail          # 다른 터미널에서 receiver.log tail
 ```
 
-> **참고**: `.env` 없이도 모든 로컬 기능이 정상 작동합니다. Hub 연결은 스킬 공유, 워커 풀, 진화 리더보드 등 네트워크 기능에만 필요합니다.
+이 스크립트는 로컬 Slack 수신자(`http://127.0.0.1:<임의의 포트>/slack` 수신 대기)로 전송하므로, `dev-fixtures/aws.html`을 편집할 때 실제 Slack 페이로드를 터미널에서 직접 확인할 수 있습니다. 깨끗한 상태에서 시작하려면, `make watch-fresh`를 실행하거나(`dev-fixtures/state/` 정리) 해당 디렉터리를 직접 삭제하세요: `rm -rf dev-fixtures/state`.
+
+"다른 터미널에서 `make watch-tail` 실행" 설계의 근거와, 어떤 fixture 파일이 .gitignore 대상이고 어떤 파일이 커밋 대상인지 전체 목록은 [`dev-fixtures/README.md`](dev-fixtures/README.md)를 참조하세요.
 
 ## 빠른 시작
 

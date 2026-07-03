@@ -1,0 +1,35 @@
+name: link-check
+
+# Dedicated workflow so the README status badge
+# (https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)
+# reflects ONLY the cross-link audit verdict, not the entire CI suite.
+# The ci.yml workflow also runs `npm run check-links`; this file duplicates
+# the check so the badge stays accurate even if ci.yml is restructured
+# later, and so the gate on cross-link health (PRs blocked on broken refs)
+# remains even if the broader ci.yml workflow is split or trimmed.
+
+# Cancel superseded runs on the same ref so a rapid series of pushes to
+# the same PR only spends CI minutes on the most-recent commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run check-links

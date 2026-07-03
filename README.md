@@ -5,6 +5,10 @@
 [![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-green.svg)](https://nodejs.org/)
 [![npm downloads](https://img.shields.io/npm/dm/@evomap/evolver.svg)](https://www.npmjs.com/package/@evomap/evolver)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.15097-b31b1b.svg)](https://arxiv.org/abs/2604.15097)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
+[![link check](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml/badge.svg)](https://github.com/EvoMap/evolver/actions/workflows/link-check.yml)
 
 ![Evolver Cover](assets/cover.png)
 
@@ -168,9 +172,11 @@ If none of those have content yet, you'll see `memory_missing` /
 during the first few cycles. They will go quiet on their own as
 `memory_graph.jsonl` accumulates outcomes — no manual setup required.
 
-## Run from Source (Contributors Only)
+## Developer Workflow
 
-Skip this section entirely if you installed via `npm install -g @evomap/evolver` above. This path exists so contributors can hack on the engine.
+Skip this section entirely if you installed via `npm install -g @evomap/evolver` above — the rest of this README targets users running the published CLI. The subsections below are for contributors running the engine from source, iterating on `scripts/`, or sending PRs. Future contributor-facing material belongs here as `### ` children, not as `## ` siblings — that keeps the user-vs-contributor split clean.
+
+### Run from Source (Contributors Only)
 
 ```bash
 git clone https://github.com/EvoMap/evolver.git
@@ -184,6 +190,34 @@ node index.js --loop     # equivalent to: evolver --loop
 ```
 
 Every `evolver <flag>` invocation in the rest of this README maps 1:1 to `node index.js <flag>` when running from source.
+
+### Local dev: `make watch`
+
+If you want to iterate on `scripts/bedrock-alias-watch.sh` against locally
+simulated AWS Bedrock updates — e.g. when adding a new Anthropic model to
+`KNOWN_BEDROCK_ALIASES` in `src/proxy/router/messages_route.js`, or testing
+how the watch script detects dated-revision or retirement events — use
+`make watch`:
+
+```bash
+make watch               # 60s loop, edit dev-fixtures/aws.html
+WATCH_INTERVAL=10 make watch   # faster loop
+make watch-fresh         # clear state/ first
+make watch-once          # run once, no loop
+make watch-tail          # tail receiver.log (second window)
+```
+
+The watch script runs against a local Slack receiver on
+`http://127.0.0.1:<random-port>/slack`, so you see the actual Slack payload
+in your terminal in real time as you edit `dev-fixtures/aws.html`. To start
+from a clean slate, either run `make watch-fresh` (clears
+`dev-fixtures/state/`) or delete the directory directly:
+`rm -rf dev-fixtures/state`.
+
+See [`dev-fixtures/README.md`](dev-fixtures/README.md) for the rationale
+behind the second-window `make watch-tail` (useful when `make watch` is
+already running in another terminal), and for the full list of fixture
+files and which are gitignored vs. committed.
 
 ## What Evolver Does (and Does Not Do)
 
