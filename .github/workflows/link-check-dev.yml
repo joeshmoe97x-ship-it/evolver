@@ -121,7 +121,7 @@ jobs:
             exit 0
           fi
           git commit \
-            -m "ci: capture dev-only link-check log for ${{ steps.branch-dir.outputs.BRANCH_DIR }}@${{ github.sha }} [skip ci]" \
+            -m "ci: capture dev-only link-check log for ${{ steps.branch-dir.outputs.BRANCH_DIR }}@${{ github.sha }}" \
             || echo 'commit-failed-skipped'
           git push \
             "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
