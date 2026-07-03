@@ -91,7 +91,10 @@ jobs:
             echo '=== Step 1: actions/setup-node@v4 (resolved Node) ==='
             node --version
             echo ''
-            echo '=== Step 2: npm run check-links (dev-only) ==='
+            echo '=== Step 2: npm run check-bedrock-prefix (dev-only) ==='
+            npm run check-bedrock-prefix
+            echo ''
+            echo '=== Step 3: npm run check-links (dev-only) ==='
             npm run check-links
           } > "evolver/artifacts/$BRANCH_DIR/dev-check.log" 2>&1
 

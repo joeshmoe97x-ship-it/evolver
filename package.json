@@ -32,6 +32,7 @@
     "a2a:ingest": "node scripts/a2a_ingest.js",
     "a2a:promote": "node scripts/a2a_promote.js",
     "check-links": "node scripts/check-readme-links.js",
+    "check-bedrock-prefix": "if grep -nF '(global|us|eu|ap)' scripts/bedrock-alias-watch.sh | grep -vE '^[0-9]+:[[:space:]]*#'; then echo 'FAIL: hardcoded (global|us|eu|ap) literal found in a non-comment context in scripts/bedrock-alias-watch.sh. Use PREFIX_REGEX (driven by BEDROCK_REGIONAL_PREFIXES) instead.' && exit 1; else exit 0; fi",
     "test": "node -e \"const fs=require('fs'),cp=require('child_process');const all=fs.readdirSync('test').filter(f=>f.endsWith('.test.js'));const iso=new Set(['solidifyIntegration.test.js']);const others=all.filter(f=>!iso.has(f)).map(f=>'test/'+f);const isoFiles=all.filter(f=>iso.has(f)).map(f=>'test/'+f);if(others.length)cp.execSync('node --test '+others.join(' '),{stdio:'inherit'});if(isoFiles.length)cp.execSync('node --test '+isoFiles.join(' '),{stdio:'inherit'})\""
   },
   "engines": {
