@@ -29,8 +29,11 @@
 #   for the same family) are intentionally NOT alerted — the canonicalizer
 #   already rewrites the inbound to the table's value.
 #
-# Regional prefix coverage: the regex matches (global|us|eu|ap). If AWS
-# adds another regional prefix, update the regex.
+# Regional prefix coverage: the regex prefix alternation comes from the
+# BEDROCK_REGIONAL_PREFIXES env var (default global|us|eu|ap). AWS-side
+# additions can be picked up by exporting the env var; KNOWN_BEDROCK_ALIASES
+# entries whose prefix is not in the list trigger a WARN at the top of
+# every run so the operator does not miss the gap.
 #
 # Crontab (06:00 daily in the system timezone — cron does NOT honor UTC):
 #   0 6 * * *  /path/to/evolver/scripts/bedrock-alias-watch.sh >> $HOME/.local/state/evolver/bedrock-alias-watch.log 2>&1
@@ -48,6 +51,14 @@
 #                         (default: supported-models page).
 #   STATE_DIR             Override state directory
 #                         (default: ${XDG_STATE_HOME:-$HOME/.local/state}/evolver).
+#   BEDROCK_REGIONAL_PREFIXES  | separated alternation of regional prefixes
+#                              the script greps for and warns about
+#                              (default: global|us|eu|ap). AWS-side
+#                              additions (e.g. a future jp.*) can be
+#                              picked up via this env var; KNOWN_BEDROCK_ALIASES
+#                              entries whose prefix is not in the list trigger
+#                              a WARN at the top of every run so the operator
+#                              does not miss the gap.
 #   DRY_RUN=1             Print new IDs but skip the Slack post AND skip
 #                         the state-file update. Useful for testing.
 #
@@ -59,6 +70,16 @@ AWS_BEDROCK_URL="${AWS_BEDROCK_URL:-https://docs.aws.amazon.com/bedrock/latest/u
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/evolver}"
 STATE_FILE="$STATE_DIR/bedrock-alias-watch.json"
 LOCK_DIR="$STATE_DIR/bedrock-alias-watch.lock"
+
+# Regional prefix alternation. The grep/sed regexes below use
+# PREFIX_REGEX (the | separated alternation wrapped in (...) anchoring)
+# rather than a hardcoded literal list. AWS-side additions (e.g. a future
+# jp.* or me.*) can be picked up by exporting BEDROCK_REGIONAL_PREFIXES.
+# The (...) wrapping matters: a bare `${BEDROCK_REGIONAL_PREFIXES}` would
+# expand to `global|us|eu|ap` and parse as `global OR us OR eu OR ap` in
+# sed (unanchored) instead of the intended `(global|us|eu|ap)`.
+BEDROCK_REGIONAL_PREFIXES="${BEDROCK_REGIONAL_PREFIXES:-global|us|eu|ap}"
+PREFIX_REGEX="(${BEDROCK_REGIONAL_PREFIXES})"
 
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -88,7 +109,7 @@ grep -oE "'(opus|sonnet|haiku)/[0-9]+/[0-9]+'" "$MESSAGES_ROUTE_FILE" \
   | tr -d "'" | sort -u > "$KNOWN_KEYS_FILE"
 
 KNOWN_FULL_FILE="$(mktemp)"; TMP_FILES+=("$KNOWN_FULL_FILE")
-grep -oE "'(global|us|eu|ap)\.anthropic\.claude-[a-z0-9.:-]+'" "$MESSAGES_ROUTE_FILE" \
+grep -oE "'${PREFIX_REGEX}\.anthropic\.claude-[a-z0-9.:-]+'" "$MESSAGES_ROUTE_FILE" \
   | tr -d "'" | sort -u > "$KNOWN_FULL_FILE"
 
 # canon -> full_id map. Invariant: KNOWN_BEDROCK_ALIASES has exactly one
@@ -97,10 +118,36 @@ grep -oE "'(global|us|eu|ap)\.anthropic\.claude-[a-z0-9.:-]+'" "$MESSAGES_ROUTE_
 # full ID for the prefix comparison.
 KNOWN_MAP_FILE="$(mktemp)"; TMP_FILES+=("$KNOWN_MAP_FILE")
 while IFS= read -r full_id; do
-  canon="$(printf '%s' "$full_id" | sed -E 's/^(global|us|eu|ap)\.anthropic\.claude-([a-z]+)-([0-9]+)-([0-9]+).*/\2\/\3\/\4/')"
+  canon="$(printf '%s' "$full_id" | sed -E "s/^${PREFIX_REGEX}\.anthropic\.claude-([a-z]+)-([0-9]+)-([0-9]+).*/\2\/\3\/\4/")"
   printf '%s|%s\n' "$canon" "$full_id"
 done < "$KNOWN_FULL_FILE" > "$KNOWN_MAP_FILE"
 log "known family/major/minor: $(wc -l < "$KNOWN_KEYS_FILE" | tr -d ' ')  full IDs: $(wc -l < "$KNOWN_FULL_FILE" | tr -d ' ')"
+
+# --- 1b. Smoke check on KNOWN_BEDROCK_ALIASES: warn if any entry has a
+#      regional prefix that is not in the configured BEDROCK_REGIONAL_PREFIXES.
+#      If AWS adds `jp.*` (or similar) and an operator forgets to extend either
+#      the env var or the table, this check catches it before the diff pass.
+#      Backed by UNKNOWN_PREFIX_FILE + a single log() loop -- cheap even on
+#      thousands of entries.
+UNKNOWN_PREFIX_FILE="$(mktemp)"; TMP_FILES+=("$UNKNOWN_PREFIX_FILE")
+while IFS= read -r full_id; do
+  # `tr -d "'"` strips the JS single-quote artifacts the grep above emitted
+  # so the prefix match works on a clean "global." / "us." token.
+  normalised="$(printf '%s' "$full_id" | tr -d "'")"
+  prefix="$(printf '%s' "$normalised" | cut -d. -f1)"
+  # Match $prefix against the configured | separated literal list.
+  # `printf | tr | grep -Fxq` is the bash-no-array idiom for "in list".
+  if ! printf '%s\n' "$BEDROCK_REGIONAL_PREFIXES" | tr '|' '\n' | grep -Fxq "$prefix"; then
+    printf '%s\n' "$normalised"
+  fi
+done < "$KNOWN_FULL_FILE" > "$UNKNOWN_PREFIX_FILE" || true
+UNKNOWN_COUNT="$(wc -l < "$UNKNOWN_PREFIX_FILE" | tr -d ' ')"
+if [[ "$UNKNOWN_COUNT" -gt 0 ]]; then
+  log "WARN: $UNKNOWN_COUNT known alias(es) have a regional prefix not in BEDROCK_REGIONAL_PREFIXES (default: 'global|us|eu|ap'). Operator should review + extend BEDROCK_REGIONAL_PREFIXES if AWS added a new region:"
+  while IFS= read -r unknown_id; do
+    log "  - $unknown_id"
+  done < "$UNKNOWN_PREFIX_FILE"
+fi
 
 # --- 2. Load previously-seen keys + dated IDs from the state file.
 #      Backwards-compat: read either `seen_keys` (current) or `seen_ids`
@@ -124,9 +171,9 @@ if ! curl -fsSL --max-time 30 "$AWS_BEDROCK_URL" -o "$HTML_FILE"; then
 fi
 AWS_KEYS_FILE="$(mktemp)"; TMP_FILES+=("$AWS_KEYS_FILE")
 AWS_FULL_FILE="$(mktemp)"; TMP_FILES+=("$AWS_FULL_FILE")
-grep -oE '(global|us|eu|ap)\.anthropic\.claude-(opus|sonnet|haiku)-[0-9]+-[0-9]+' "$HTML_FILE" \
+grep -oE "${PREFIX_REGEX}\.anthropic\.claude-(opus|sonnet|haiku)-[0-9]+-[0-9]+" "$HTML_FILE" \
   | sed -E 's/.*claude-([a-z]+)-([0-9]+)-([0-9]+).*/\1\/\2\/\3/' | sort -u > "$AWS_KEYS_FILE"
-grep -oE '(global|us|eu|ap)\.anthropic\.claude-[a-z0-9.:-]+' "$HTML_FILE" | sort -u > "$AWS_FULL_FILE"
+grep -oE "${PREFIX_REGEX}\.anthropic\.claude-[a-z0-9.:-]+" "$HTML_FILE" | sort -u > "$AWS_FULL_FILE"
 log "AWS-listed: $(wc -l < "$AWS_KEYS_FILE" | tr -d ' ') keys, $(wc -l < "$AWS_FULL_FILE" | tr -d ' ') full IDs"
 
 # --- 4a. New family/major/minor: (AWS \ KNOWN) \ SEEN.

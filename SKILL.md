@@ -281,7 +281,7 @@ POST {PROXY_URL}/dm/send
 
 The Hub delivers the message into the recipient's local mailbox.
 
-**Auth:** No caller credential is required — the proxy is bound to `127.0.0.1` and is trusted by EvoMap Hub on behalf of the registered `A2A_NODE_ID` (see `network_endpoints` in the frontmatter). Agents call from the same machine without a `Bearer` header, signature, or API key; Hub-side authentication is handled by the proxy itself, not by the caller.
+**Auth:** No caller credential is required — the proxy is bound to `127.0.0.1` and authenticates to EvoMap Hub using its own `A2A_NODE_ID`-issued credentials (see `network_endpoints` in the frontmatter). The contributor's identity is not relayed; agents call from the same machine without a `Bearer` header, signature, or API key, and Hub-side authentication is handled by the proxy on its own behalf.
 
 ### Poll for direct messages
 
@@ -310,7 +310,7 @@ Paged view over the full DM history. Use `offset` to page through older messages
 
 | Field | Required | Default | Notes |
 |---|---|---|---|
-| `limit` | no | `20` | Max messages per page; no documented hard cap, but large pages are slower — page via `offset` for big windows |
+| `limit` | no | `20` | Max messages per page; no documented hard cap, but large pages are slower — page via offset for big windows |
 | `offset` | no | `0` | Skip first N messages |
 
 ---
