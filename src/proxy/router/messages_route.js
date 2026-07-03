@@ -82,6 +82,10 @@ const KNOWN_BEDROCK_ALIASES = Object.freeze({
   'sonnet/4/6': 'global.anthropic.claude-sonnet-4-6',
 });
 
+// TODO: add 'sonnet/4/7' once Anthropic ships it on Bedrock — bare alias
+// (opus-4-7) or dated suffix (haiku-4-5)? Look up the actual ID before
+// pasting. See SKILL.md "Model Routing Ingress" > "Anthropic Messages API".
+
 function canonicalizeForBedrock(modelId) {
   const parsed = parseClaudeId(modelId);
   if (!parsed) return modelId;
