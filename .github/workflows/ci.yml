@@ -1,0 +1,252 @@
+# GitHub Actions CI for evolver.
+#
+# This workflow exercises the full `make watch-once` pipeline end-to-end
+# against an in-memory fixture mutation, then asserts the local Slack
+# receiver (scripts/dev-slack-receiver.js) captured the expected payload.
+# Its job is to catch regressions in the dev-watch env wiring — e.g. a
+# future change to scripts/dev-watch.sh that breaks SLACK_WEBROCK_URL
+# propagation, AWS_BEDROCK_URL resolution, STATE_DIR override, or the
+# DRY_RUN=0 leak guard.
+#
+# The contract:
+#   1. Overwrite dev-fixtures/aws.html with a synthetic doc that exactly
+#      matches messages_route.js coverage plus ONE fresh family/major/minor
+#      (opus/4/9). The synthetic doc has zero drift, so any alert the
+#      script posts is unambiguously caused by the CI's mutation.
+#   2. Run `make watch-once` (starts receiver + tails log + runs watch
+#      script once + cleans up).
+#   3. Assert dev-fixtures/receiver.log contains:
+#        - the new canon (opus/4/9)
+#        - the "new family/major/minor" section header
+#        - a POST /slack line (proves the curl actually went out)
+#   4. Restore the source-controlled dev-fixtures/aws.html in an
+#      `if: always()` step so a failed CI run never leaves the working
+#      tree dirty for the next attempt. dev-fixtures/state/ and the
+#      .receiver.* scratch files are gitignored, so they don't need
+#      explicit restoration.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel any in-progress run on the same ref so a push-and-PR combo
+# never races on dev-fixtures/aws.html.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default to read-only token. Both jobs only need `contents: read` for
+# `actions/checkout@v4`, so we hoist the permission to the workflow
+# level and don't have to repeat it per job.
+permissions:
+  contents: read
+
+jobs:
+  watch-once-fixture:
+    name: make watch-once against fixture mutation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # dev-slack-receiver.js requires Node. evolver's engines field
+      # requires >=22.12; pin to the closest LTS. ubuntu-latest already
+      # ships bash + curl + jq + make + python3 — no apt install needed.
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify required tools
+        run: |
+          set -euo pipefail
+          for cmd in bash node make jq curl grep; do
+            command -v "$cmd" >/dev/null 2>&1 || { echo "missing required command: $cmd"; exit 1; }
+            echo "  $cmd: $($cmd --version 2>&1 | head -1)"
+          done
+
+      - name: Run make watch-once against fixture mutation
+        run: |
+          set -euo pipefail
+
+          # 1. Snapshot the source-controlled aws.html so we can restore
+          #    it in the next step regardless of pass/fail.
+          cp dev-fixtures/aws.html /tmp/aws-original.html
+
+          # 2. Clear any state carried over from a previous run on the
+          #    same self-hosted runner (we're on github-hosted so this
+          #    is a no-op, but cheaper to be explicit than to debug).
+          rm -rf dev-fixtures/state
+          rm -f dev-fixtures/.receiver.pid dev-fixtures/.receiver.port dev-fixtures/receiver.log
+
+          # 3. Synthetic fixture: exact messages_route.js coverage so the
+          #    baseline has zero drift, then ONE fresh family/major/minor
+          #    (opus/4/9) so the only alert the watch script can produce
+          #    is the one CI just introduced. If this assertion fails,
+          #    it's a regression in the watch script — not fixture drift.
+          cat > dev-fixtures/aws.html <<'HTML'
+          <html><body><ul>
+            <li>global.anthropic.claude-opus-4-7</li>
+            <li>global.anthropic.claude-haiku-4-5-20251001-v1:0</li>
+            <li>global.anthropic.claude-sonnet-4-6</li>
+            <li>global.anthropic.claude-opus-4-9</li>
+          </ul></body></html>
+          HTML
+
+          # 4. End-to-end pipeline. Starts receiver, runs watch.sh once
+          #    with all env vars wired (STATE_DIR / MESSAGES_ROUTE_FILE /
+          #    AWS_BEDROCK_URL / SLACK_WEBHOOK_URL / DRY_RUN=0), then
+          #    kills receiver + tail cleanly.
+          make watch-once
+
+          # 5. Echo the receiver log for debugging — it's both the
+          #    assertion target AND the failure-context payload.
+          echo "=== dev-fixtures/receiver.log ==="
+          cat dev-fixtures/receiver.log
+          echo "=== end receiver log ==="
+
+          # 6. Assertions. Each one prints the full log on failure so a
+          #    failing CI run has enough context to diagnose without an
+          #    artifacts download.
+          grep -q 'opus/4/9' dev-fixtures/receiver.log || {
+            echo "FAIL: receiver log does not mention Opus/4/9 — the new canon never appeared in the Slack payload"
+            exit 1
+          }
+          grep -q 'new family/major/minor not yet in' dev-fixtures/receiver.log || {
+            echo "FAIL: receiver log is missing the 'new family/major/minor' section header"
+            exit 1
+          }
+          grep -q 'POST /slack' dev-fixtures/receiver.log || {
+            echo "FAIL: receiver log is missing a 'POST /slack' entry — the curl never reached the receiver"
+            exit 1
+          }
+
+          # 7. Negative assertion: only ONE new family/major/minor was
+          #    introduced, so the message must report exactly "1".
+          grep -Eq 'published 1 new family/major/minor' dev-fixtures/receiver.log || {
+            echo "FAIL: receiver log does not report exactly 1 new family/major/minor — extra drift or no alert"
+            exit 1
+          }
+
+          echo "PASS: fixture mutation produced the expected Slack payload"
+
+      # Restore the source-controlled aws.html so a failed CI run never
+      # poisons the next attempt's checkout. dev-fixtures/state/, the
+      # .receiver.* scratch files, and dev-fixtures/receiver.log are all
+      # gitignored, so they don't need explicit cleanup.
+      - name: Restore dev-fixtures/aws.html
+        if: always()
+        run: |
+          if [ -f /tmp/aws-original.html ]; then
+            cp /tmp/aws-original.html dev-fixtures/aws.html
+            echo "Restored dev-fixtures/aws.html from /tmp/aws-original.html"
+          else
+            echo "No snapshot to restore from — skipping"
+          fi
+
+  # Catch a class of regressions the watch-once job doesn't: a future
+  # change to .gitignore / .npmignore / package.json `files` that would
+  # leak dev-fixtures runtime artifacts (state/, receiver.log, .receiver.*
+  # pid/port) into the published npm tarball. Runs in parallel with
+  # watch-once-fixture since it doesn't share any state with it.
+  pack-tarball-clean:
+    name: pack tarball excludes dev-fixtures runtime artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # npm itself is shipping with ubuntu-latest, but we declare Node
+      # 22 anyway so npm resolves to a known-good version (>=10) — the
+      # shipped version moves with the runner image.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: npm pack --dry-run + exclusion assertions
+        run: |
+          set -euo pipefail
+
+          # Capture the tarball listing. `npm pack --dry-run` prints each
+          # included file as `npm notice <size> <path>` to stderr; we
+          # redirect 2>&1 to capture the full listing in one string.
+          LISTING="$(npm pack --dry-run 2>&1)"
+          echo '=== npm pack --dry-run listing ==='
+          echo "$LISTING"
+          echo '===================================='
+
+          # Negative assertions: these runtime artifacts MUST NOT ship.
+          # If a future change to dev-fixtures/.gitignore, evolver/.gitignore,
+          # or package.json `files` accidentally lets one of these through,
+          # `npm install` would dump scratch state into consumer's working
+          # dir or expose internal logs / ports. The leading `[[:space:]]`
+          # anchors each path as a separate token in the `npm notice` listing
+          # (so `dev-fixtures/state` doesn't accidentally match
+          # `dev-fixtures/stateful.json`), and the trailing `\b` rejects
+          # mid-token matches.
+          for path in \
+            dev-fixtures/state \
+            dev-fixtures/receiver.log \
+            dev-fixtures/.receiver.pid \
+            dev-fixtures/.receiver.port \
+          ; do
+            if echo "$LISTING" | grep -Eq "[[:space:]]${path}\b"; then
+              echo "FAIL: '${path}' leaked into the published tarball — would expose runtime artifacts to consumers."
+              echo "First matching line:"
+              echo "$LISTING" | grep -m1 "${path}" || true
+              exit 1
+            fi
+            echo "  OK excluded: ${path}"
+          done
+
+          # Positive assertions: legitimate dev-fixtures and the Makefile
+          # MUST ship. Without these, a future packaging regression that
+          # empties the tarball entirely would silently pass the negative
+          # assertions above. We anchor on END-OF-LINE here — not on
+          # `\b` — because `\b` matches between any word/non-word char
+          # (including `l`→`.`), so `Makefile\b` would still match a
+          # hypothetical `Makefile.frontend`. Since npm pack --dry-run
+          # always lists each path as the last token of its line, EOL
+          # anchoring is correct. (The negative branch keeps `\b`
+          # because we want to be tolerant of `dev-fixtures/state/`.)
+          for path in \
+            dev-fixtures/aws.html \
+            dev-fixtures/messages_route.js \
+            dev-fixtures/README.md \
+            Makefile \
+          ; do
+            if ! echo "$LISTING" | grep -Eq "[[:space:]]${path}\$"; then
+              echo "FAIL: '${path}' missing from tarball — files-array or .gitignore is broken."
+              exit 1
+            fi
+            echo "  OK present:  ${path}"
+          done
+
+          echo 'PASS: tarball contains exactly the expected set of dev-fixtures + Makefile'
+
+  # Catches a different class of regressions from the other two jobs:
+  # a future README edit that renames a section without updating every
+  # `[text](#anchor)` reference to it, or a typo in a cross-file link.
+  # Runs in parallel with the watch-once + pack-tarball jobs since it
+  # only reads files (no fs mutations).
+  link-check:
+    name: README cross-links resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: npm run check-links
+        run: npm run check-links
