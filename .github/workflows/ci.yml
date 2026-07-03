@@ -24,6 +24,12 @@
 #      tree dirty for the next attempt. dev-fixtures/state/ and the
 #      .receiver.* scratch files are gitignored, so they don't need
 #      explicit restoration.
+#
+# NOTE: link-check is intentionally NOT a job in this workflow. It
+# lives in `.github/workflows/link-check.yml` as its own dedicated
+# workflow with its own status badge, concurrency group, and `actions/
+# setup-node@v4` pin — `git log --grep="drop redundant link-check"`
+# surfaces the move commit if you ever need to reconcile the two.
 
 name: CI
 
