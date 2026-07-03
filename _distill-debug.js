@@ -1,11 +1,15 @@
 'use strict';
 const fs = require('fs');
-fs.mkdirSync('/tmp/distill-debug-' + process.pid, { recursive: true });
-process.env.EVOLVER_SETTINGS_DIR = '/tmp/distill-debug-' + process.pid;
+const path = require('path');
+const TMP_DIR = '/tmp/distill-debug-' + process.pid;
+fs.mkdirSync(TMP_DIR, { recursive: true });
+process.env.EVOLVER_SETTINGS_DIR = TMP_DIR;
+// self-clean on exit (normal or via throw), so /tmp does not accumulate debug dirs
+process.on('exit', () => { try { fs.rmSync(TMP_DIR, { recursive: true, force: true }); } catch (_) {} });
 
 const convergent = (n) => '   '.repeat(n) + n;
 try {
-  const m = require('./src/gep/conversationDistiller');
+  const m = require(path.join(__dirname, 'src/gep/conversationDistiller'));
   console.log('=== require resolved OK; exported names:', Object.keys(m));
   console.log();
 } catch (e) {
@@ -19,7 +23,7 @@ try {
   process.exit(1);
 }
 
-const { distillConversation } = require('./src/gep/conversationDistiller');
+const { distillConversation } = require(path.join(__dirname, 'src/gep/conversationDistiller'));
 
 const validConversation = {
   summary: 'Reusable Evolver distill endpoint compatibility workflow for MCP plugin bridges.',
