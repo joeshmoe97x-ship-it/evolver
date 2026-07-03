@@ -35,6 +35,13 @@ const MOCK_JS = `const KNOWN_BEDROCK_ALIASES = Object.freeze({
 });
 `;
 
+// JP_MOCK_JS is the trailing-comma entry + closing brace that gets injected
+// into MOCK_JS via .replace(/\}\);\n?$/, JP_MOCK_JS) for Run 11's "JP entry
+// present" sub-case. Used to silence the direction-B smoke check WARN when
+// the table is extended to match a new prefix in the env var.
+const JP_MOCK_JS = `  'opus-jp/4/7': 'jp.anthropic.claude-opus-4-7',
+});`;
+
 // Start a Slack receiver on a random localhost port. Each POST body's
 // raw bytes are appended to `requests`. Returns a `close()` function
 // the caller MUST call to release the port.
@@ -67,7 +74,7 @@ function startSlackReceiver() {
 // state, and extra env vars. Returns {code, stdout, stderr, requests,
 // finalState, stateFile, cleanup}. The caller MUST await `cleanup()`
 // to release the port and remove the tmp dir.
-async function runWatch({ mockHtml, preState, extraEnv = {} }) {
+async function runWatch({ mockHtml, preState, mockJs = MOCK_JS, extraEnv = {} }) {
   // Accumulate cleanup functors as resources are created. If anything
   // between `mkdtemp` and a successful return throws, we run them all
   // and re-throw — the caller never sees a half-initialized result.
@@ -87,7 +94,7 @@ async function runWatch({ mockHtml, preState, extraEnv = {} }) {
   const stateFile = join(stateDir, 'bedrock-alias-watch.json');
   const jsPath = join(testRoot, 'messages_route.js');
   const htmlPath = join(testRoot, 'aws.html');
-  await writeFile(jsPath, MOCK_JS);
+  await writeFile(jsPath, mockJs);
   await writeFile(htmlPath, mockHtml);
   if (preState !== undefined) {
     await writeFile(stateFile, JSON.stringify(preState));
@@ -472,5 +479,68 @@ describe('bedrock-alias-watch.sh', () => {
       assert.equal(result.finalState.seen_retired.length, 0,
         'seen_retired should be cleared after came back');
     } finally { if (result) await result.cleanup(); }
+  });
+
+  // --- Run 10: BEDROCK_REGIONAL_PREFIXES drops 'global'. MOCK_JS has 3
+  //     global.* entries -- direction A fires (3 IDs flagged in stderr).
+  //     Direction B is silent (env \ default = {} since us|eu|ap is a
+  //     strict subset of the documented default 'global|us|eu|ap').
+  it('Run 10: env drops global, direction A fires 3 IDs, direction B silent', async () => {
+    let result;
+    try {
+      result = await runWatch({
+        mockHtml: '<html><body></body></html>',
+        extraEnv: { BEDROCK_REGIONAL_PREFIXES: 'us|eu|ap' },
+      });
+      assert.equal(result.code, 0);
+      // Direction A: exactly 3 global.* IDs flagged.
+      assert.match(result.stderr,
+        /WARN: 3 known alias\(es\) have a regional prefix not in/);
+      assert.match(result.stderr, /global\.anthropic\.claude-opus-4-7/);
+      assert.match(result.stderr, /global\.anthropic\.claude-haiku-4-5-20251001-v1:0/);
+      assert.match(result.stderr, /global\.anthropic\.claude-sonnet-4-6/);
+      // Direction B should NOT fire (env \ default is empty).
+      assert.doesNotMatch(result.stderr,
+        /env-var regional prefix.+non-default/);
+    } finally { if (result) await result.cleanup(); }
+  });
+
+  // --- Run 11: BEDROCK_REGIONAL_PREFIXES adds 'jp'. Sub-case A: env
+  //     extends to jp but the table does NOT have a jp.* entry -- direction
+  //     B fires (1 token flagged: jp). Sub-case B: env extends to jp AND the
+  //     table has a jp.* entry via JP_MOCK_JS injection -- direction B is
+  //     silenced (legitimate extension, not a typo). Distinct from Run 10
+  //     which exercises direction A.
+  it('Run 11: env adds jp, direction B fires 1 (table lacks jp) + silent (table has jp via JP_MOCK_JS)', async () => {
+    let result_no_jp, result_with_jp;
+    try {
+      // Sub-case A: env extends to jp, but MOCK_JS has no jp entry.
+      result_no_jp = await runWatch({
+        mockHtml: '<html><body></body></html>',
+        extraEnv: { BEDROCK_REGIONAL_PREFIXES: 'global|us|eu|ap|jp' },
+      });
+      assert.equal(result_no_jp.code, 0);
+      assert.match(result_no_jp.stderr,
+        /WARN: 1 env-var regional prefix.+non-default/);
+      assert.match(result_no_jp.stderr, /\bjp\b/);
+      // Direction A should NOT fire (both global and jp prefixes are in env).
+      assert.doesNotMatch(result_no_jp.stderr,
+        /known alias\(es\) have a regional prefix not in/);
+
+      // Sub-case B: env extends to jp AND the table has a jp entry.
+      // The smoke check direction B is silenced by the matching data.
+      const mockJsWithJp = MOCK_JS.replace(/\}\);\n?$/, JP_MOCK_JS);
+      result_with_jp = await runWatch({
+        mockHtml: '<html><body></body></html>',
+        mockJs: mockJsWithJp,
+        extraEnv: { BEDROCK_REGIONAL_PREFIXES: 'global|us|eu|ap|jp' },
+      });
+      assert.equal(result_with_jp.code, 0);
+      assert.doesNotMatch(result_with_jp.stderr,
+        /env-var regional prefix.+non-default/);
+    } finally {
+      if (result_no_jp) await result_no_jp.cleanup();
+      if (result_with_jp) await result_with_jp.cleanup();
+    }
   });
 });

@@ -149,6 +149,32 @@ if [[ "$UNKNOWN_COUNT" -gt 0 ]]; then
   done < "$UNKNOWN_PREFIX_FILE"
 fi
 
+# --- 1c. Smoke check direction B: warn if BEDROCK_REGIONAL_PREFIXES has a
+#      non-default prefix that has NO matching KNOWN_BEDROCK_ALIASES entry.
+#      Catches operator typos (e.g. 'europe' instead of 'eu') without
+#      nagging about legitimate extensions (e.g. 'jp') once the table is
+#      updated to match. Inverse semantics from direction A (step 1b,
+#      flags KNOWN prefixes not in env var): direction B flags env tokens
+#      that KNOWN has not caught up with.
+DEFAULT_PREFIXES='global|us|eu|ap'
+KNOWN_PREFIXES_FILE="$(mktemp)"; TMP_FILES+=("$KNOWN_PREFIXES_FILE")
+cut -d. -f1 "$KNOWN_FULL_FILE" | sort -u > "$KNOWN_PREFIXES_FILE" || true
+EXTRA_TOKEN_FILE="$(mktemp)"; TMP_FILES+=("$EXTRA_TOKEN_FILE")
+# Process substitution `-- < <(...)` keeps the while loop in the parent shell
+# so `continue` works correctly across the pipe.
+while IFS= read -r token; do
+  printf '%s\n' "$DEFAULT_PREFIXES" | tr '|' '\n' | grep -Fxq "$token" && continue
+  grep -Fxq "$token" "$KNOWN_PREFIXES_FILE" || printf '%s\n' "$token"
+done < <(printf '%s\n' "$BEDROCK_REGIONAL_PREFIXES" | tr '|' '\n' | sort -u) \
+  > "$EXTRA_TOKEN_FILE" || true
+EXTRA_COUNT="$(wc -l < "$EXTRA_TOKEN_FILE" | tr -d ' ')"
+if [[ "$EXTRA_COUNT" -gt 0 ]]; then
+  log "WARN: $EXTRA_COUNT env-var regional prefix(es) are non-default AND have no KNOWN_BEDROCK_ALIASES entry. Likely operator typo (e.g. 'europe' instead of 'eu') -- fix BEDROCK_REGIONAL_PREFIXES or add a matching entry to the table. The prefix will re-fire this WARN until addressed either way:"
+  while IFS= read -r extra_token; do
+    log "  - $extra_token"
+  done < "$EXTRA_TOKEN_FILE"
+fi
+
 # --- 2. Load previously-seen keys + dated IDs from the state file.
 #      Backwards-compat: read either `seen_keys` (current) or `seen_ids`
 #      (round-1 format) so existing state files aren't invalidated.
