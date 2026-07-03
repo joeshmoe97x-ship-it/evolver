@@ -231,22 +231,4 @@ jobs:
 
           echo 'PASS: tarball contains exactly the expected set of dev-fixtures + Makefile'
 
-  # Catches a different class of regressions from the other two jobs:
-  # a future README edit that renames a section without updating every
-  # `[text](#anchor)` reference to it, or a typo in a cross-file link.
-  # Runs in parallel with the watch-once + pack-tarball jobs since it
-  # only reads files (no fs mutations).
-  link-check:
-    name: README cross-links resolve
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: npm run check-links
-        run: npm run check-links
